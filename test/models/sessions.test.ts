@@ -1,0 +1,295 @@
+import assert from 'node:assert/strict';
+import test from 'node:test';
+import { SessionRegistry } from '../../app/models/sessions.js';
+import { FakeLauncher, fixtureConfig } from '../support/helpers.js';
+
+test('only deliberate Start launches; session IDs and immutable metadata survive inspection and sibling Stop', async () => {
+  const launcher = new FakeLauncher(); const config = fixtureConfig();
+  const registry = new SessionRegistry({ config, launcher });
+  assert.deepEqual(registry.list(), []);
+  assert.equal(registry.find('unallocated'), undefined);
+  assert.equal(launcher.handles.length, 0);
+  const first = await registry.start('powershell', 120, 40);
+  const second = await registry.start('powershell', 90, 25);
+  assert.notEqual(first.id, second.id);
+  assert.equal(first.profileId, 'powershell'); assert.equal(first.agentState, 'unknown');
+  const inspected = registry.find(first.id)!; inspected.label = 'changed by caller';
+  assert.equal(registry.find(first.id)!.label, 'PowerShell');
+  await registry.stop(first.id);
+  assert.equal(registry.find(first.id)!.processState, 'exited');
+  assert.equal(registry.find(second.id)!.processState, 'running');
+  assert.equal(launcher.handles[1].stops, 0);
+  await registry.shutdown(); await registry.shutdown();
+  assert.equal(launcher.handles[1].stops, 1);
+});
+
+test('launch reservations enforce capacity, immediate exit stays accurate, and only old exited records are evicted', async () => {
+  const config = fixtureConfig(); config.capacity.maxRunningSessions = 1; config.capacity.retainedExitedSessions = 1;
+  const launcher = new FakeLauncher(); const registry = new SessionRegistry({ config, launcher });
+  const pending = registry.start('powershell', 120, 40);
+  await assert.rejects(registry.start('powershell', 120, 40), /SESSION_CAPACITY/);
+  const first = await pending;
+  await registry.stop(first.id);
+  launcher.beforeReturn = pty => pty.exit(7);
+  const immediate = await registry.start('powershell', 120, 40);
+  assert.equal(immediate.processState, 'exited'); assert.equal(immediate.exitCode, 7);
+  assert.equal(registry.find(first.id), undefined);
+  assert.equal(registry.list().length, 1);
+  await registry.shutdown();
+});
+
+test('retention keeps the most recently exited session and failed Stop allows deliberate recovery', async () => {
+  const config = fixtureConfig(); config.capacity.retainedExitedSessions = 1;
+  const launcher = new FakeLauncher(); const registry = new SessionRegistry({ config, launcher });
+  const olderRunning = await registry.start('powershell', 120, 40);
+  const newerRunning = await registry.start('powershell', 120, 40);
+  await registry.stop(newerRunning.id);
+  const nativeStop = launcher.handles[0].stop.bind(launcher.handles[0]);
+  let attempts = 0;
+  launcher.handles[0].stop = async () => { if (++attempts === 1) throw new Error('fixture transient failure'); return nativeStop(); };
+  await assert.rejects(registry.stop(olderRunning.id));
+  assert.equal(registry.find(olderRunning.id)!.stopPending, false);
+  assert.equal(registry.find(olderRunning.id)!.processState, 'running');
+  await registry.stop(olderRunning.id);
+  assert.equal(attempts, 2);
+  assert.equal(registry.find(newerRunning.id), undefined);
+  assert.equal(registry.find(olderRunning.id)!.processState, 'exited');
+  await registry.shutdown();
+});
+
+test('shutdown reports a finite cleanup failure without claiming a process exited', { timeout: 2000 }, async () => {
+  const config = fixtureConfig(); const launcher = new FakeLauncher();
+  const registry = new SessionRegistry({ config, launcher, shutdownTimeoutMs: 40 });
+  const session = await registry.start('powershell', 120, 40);
+  launcher.handles[0].stop = () => new Promise(() => {});
+  await assert.rejects(registry.shutdown(), /HOST_SHUTDOWN_TIMEOUT/);
+  assert.equal(registry.find(session.id)!.processState, 'running');
+  await assert.rejects(registry.start('powershell', 120, 40), /HOST_CLOSING/);
+});
+
+test('failed exited-tree cleanup retains ownership and reserves capacity until verified retry', async () => {
+  const config = fixtureConfig(); config.capacity.maxRunningSessions = 1; config.capacity.retainedExitedSessions = 1;
+  const launcher = new FakeLauncher(); const registry = new SessionRegistry({ config, launcher });
+  const failed = await registry.start('powershell', 120, 40); let attempts = 0;
+  launcher.handles[0].stop = async () => {
+    if (++attempts === 1) { launcher.handles[0].exit(7); throw new Error('STOP_TREE_FAILED'); }
+    return { exitCode: 7, verifiedPids: [launcher.handles[0].pid] };
+  };
+  try {
+    await assert.rejects(registry.stop(failed.id), /STOP_TREE_FAILED/);
+    await registry.require(failed.id).drain();
+    await assert.rejects(registry.start('powershell', 120, 40), /SESSION_CAPACITY/);
+    config.capacity.maxRunningSessions = 2;
+    const newer = await registry.start('powershell', 120, 40); await registry.stop(newer.id);
+    assert.equal(registry.find(failed.id)!.failureCode, 'STOP_FAILED', 'exit retention cannot lose failed cleanup ownership');
+    await registry.shutdown(); assert.equal(attempts, 2);
+  } finally { await registry.shutdown(); }
+});
+
+test('later parser rejection or backlog overflow cannot erase failed cleanup ownership before retry', async () => {
+  for (const cause of ['parser-error', 'parser-backlog']) {
+  const config = fixtureConfig(); config.capacity.retainedExitedSessions = 1;
+  const launcher = new FakeLauncher(); const registry = new SessionRegistry({ config, launcher });
+  const summary = await registry.start('powershell', 120, 40); const record = registry.require(summary.id); let rejectParse!: (error: Error) => void; let attempts = 0;
+  record.outputHandler = () => new Promise((_resolve, reject) => { rejectParse = reject; });
+  launcher.handles[0].output('held harmless final output'); await new Promise(resolve => setImmediate(resolve));
+  launcher.handles[0].stop = async () => {
+    if (++attempts === 1) { launcher.handles[0].exit(7); throw new Error('STOP_TREE_FAILED'); }
+    return { exitCode: 7, verifiedPids: [launcher.handles[0].pid] };
+  };
+  try {
+    await assert.rejects(registry.stop(summary.id), /STOP_TREE_FAILED/);
+    if (cause === 'parser-backlog') launcher.handles[0].output('x'.repeat(4 * 1024 * 1024));
+    rejectParse(new Error('FIXTURE_PARSER_FAILED'));
+    await record.drain(); await new Promise(resolve => setImmediate(resolve));
+    assert.equal(record.bridgeFailed, true); assert.equal(record.metadata.failureCode, 'STOP_FAILED');
+    const newer = await registry.start('powershell', 120, 40); await registry.stop(newer.id);
+    assert.ok(registry.find(summary.id), 'parser error cannot permit eviction of unfinished cleanup');
+    await registry.shutdown(); assert.equal(attempts, 2); assert.equal(record.metadata.failureCode, 'TERMINAL_BRIDGE_FAILED');
+  } finally { rejectParse?.(new Error('FIXTURE_FINALIZE')); await registry.shutdown(); }
+  }
+});
+
+test('shutdown drains an already reserved launch and stops its eventual native process once', async () => {
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; });
+  const launcher = new FakeLauncher();
+  const registry = new SessionRegistry({ config: fixtureConfig(), launcher: {
+    start: async profile => { await gate; return launcher.start(profile); },
+  } });
+  const start = registry.start('powershell', 120, 40);
+  const shutdown = registry.shutdown();
+  release();
+  await assert.rejects(start, /HOST_CLOSING/);
+  await shutdown;
+  assert.equal(launcher.handles.length, 1); assert.equal(launcher.handles[0].stops, 1);
+});
+
+test('natural root exit retains descendants, capacity and history until verified Stop', async () => {
+  const config = fixtureConfig(); config.capacity.maxRunningSessions = 1; config.capacity.retainedExitedSessions = 1;
+  const launcher = new FakeLauncher(); const registry = new SessionRegistry({ config, launcher });
+  const root = await registry.start('powershell', 80, 24);
+  launcher.handles[0].exit(0, true); await registry.require(root.id).drain();
+  assert.equal(registry.find(root.id)!.processState, 'exited');
+  assert.equal(registry.find(root.id)!.failureCode, 'STOP_FAILED');
+  await assert.rejects(registry.forget(root.id), /SESSION_NOT_FINISHED/);
+  await assert.rejects(registry.start('powershell', 80, 24), /SESSION_CAPACITY/);
+  config.capacity.maxRunningSessions = 2;
+  for (let index = 0; index < 3; index++) { const sibling = await registry.start('powershell', 80, 24); await registry.stop(sibling.id); }
+  assert.ok(registry.find(root.id), 'unfinished descendants survive history eviction');
+  await registry.stop(root.id);
+  assert.equal(registry.find(root.id), undefined, 'completed old session can now be evicted');
+  await registry.shutdown();
+});
+
+test('Mac scope remains visible after verified tracked cleanup', async () => {
+  const launcher = new FakeLauncher();
+  launcher.beforeReturn = pty => {
+    Object.defineProperty(pty, 'cleanupScope', { value: 'tracked-descendants' });
+    const stop = pty.stop.bind(pty);
+    pty.stop = async () => ({ ...await stop(), cleanupScope: 'tracked-descendants' });
+  };
+  const registry = new SessionRegistry({ config: fixtureConfig(), launcher });
+  const session = await registry.start('powershell', 80, 24);
+  assert.equal(session.failureCode, 'CLEANUP_SCOPE_LIMITED');
+  await registry.stop(session.id);
+  assert.equal(registry.find(session.id)!.failureCode, 'CLEANUP_SCOPE_LIMITED');
+  await registry.shutdown();
+});
+
+test('jobs clean descendants after natural root exit and retry a failed cleanup', { timeout: 2000 }, async () => {
+  const launcher = new FakeLauncher();
+  const registry = new SessionRegistry({ config: fixtureConfig(), launcher, jobs: new Set(['powershell']), jobStopRetryMs: 5 });
+  const session = await registry.start('powershell', 80, 24); let attempts = 0;
+  launcher.handles[0].stop = async () => {
+    if (++attempts === 1) throw new Error('STOP_TREE_FAILED');
+    return { exitCode: 0, verifiedPids: [launcher.handles[0].pid] };
+  };
+  launcher.handles[0].exit(0, true);
+  const deadline = Date.now() + 1000;
+  while (registry.require(session.id).cleanupRequired) {
+    assert.ok(Date.now() < deadline, 'job cleanup did not retry'); await new Promise(resolve => setTimeout(resolve, 5));
+  }
+  assert.equal(attempts, 2); await registry.shutdown();
+});
+
+test('one output observer cannot pause the PTY or suppress healthy observers', async () => {
+  const launcher = new FakeLauncher(); const registry = new SessionRegistry({ config: fixtureConfig(), launcher });
+  const session = await registry.start('powershell', 120, 40); const received: string[] = [];
+  registry.onOutput(() => { throw new Error('broken observer'); });
+  registry.onOutput((_id, data) => received.push(data));
+  launcher.handles[0].output('first'); launcher.handles[0].output('second');
+  await registry.require(session.id).drain();
+  assert.deepEqual(received, ['first', 'second']);
+  assert.equal(launcher.handles[0].paused, false);
+  assert.equal(registry.find(session.id)!.failureCode, null);
+  await registry.shutdown();
+});
+
+test('contiguous native output uses bounded parser transactions without crossing a queued capture', async () => {
+  const launcher = new FakeLauncher(); const registry = new SessionRegistry({ config: fixtureConfig(), launcher });
+  const session = await registry.start('powershell', 120, 40); const record = registry.require(session.id);
+  let release!: () => void; const gate = new Promise<void>(resolve => { release = resolve; });
+  void record.enqueue(() => gate);
+  const transactions: string[] = []; const nativeHandler = record.outputHandler!;
+  record.outputHandler = data => { transactions.push(data); return nativeHandler(data); };
+  const received: string[] = []; registry.onOutput((_id, data) => received.push(data));
+  for (let index = 0; index < 100; index++) launcher.handles[0].output('a');
+  const boundary = record.enqueue(() => record.terminal.capture());
+  launcher.handles[0].output('b'); launcher.handles[0].output('c');
+  release(); const snapshot = await boundary; await record.drain();
+  assert.deepEqual(transactions, ['a'.repeat(100), 'bc']);
+  assert.equal(snapshot.sequence, 1); assert.equal(received.join(''), 'a'.repeat(100) + 'bc'); assert.equal(record.queuedBytes, 0);
+  assert.equal(record.terminal.output.sequence, 2);
+  await registry.shutdown();
+});
+
+test('a job is ended at the bounds its configuration sets', async () => {
+  const launcher = new FakeLauncher();
+  const registry = new SessionRegistry({ config: { ...fixtureConfig(), jobs: { timeoutMs: 50, outputBytes: 16 } }, launcher,
+    jobs: new Set(['powershell']) });
+  try {
+    const slow = await registry.start('powershell', 120, 40);
+    await new Promise(resolve => setTimeout(resolve, 100)); await registry.require(slow.id).stopOperation;
+    const flood = await registry.start('powershell', 120, 40);
+    launcher.handles[1].output('x'.repeat(17)); await registry.require(flood.id).stopOperation;
+    assert.deepEqual([registry.find(slow.id)?.failureCode, registry.find(flood.id)?.failureCode], ['JOB_TIMEOUT', 'JOB_OUTPUT_LIMIT']);
+  } finally { await registry.shutdown(); }
+});
+
+test('a job whose stop at a bound fails is stopped again until it ends', async () => {
+  const launcher = new FakeLauncher();
+  const registry = new SessionRegistry({ config: { ...fixtureConfig(), jobs: { timeoutMs: 20, outputBytes: 1024 } }, launcher,
+    jobs: new Set(['powershell']), jobStopRetryMs: 20 });
+  try {
+    const summary = await registry.start('powershell', 120, 40);
+    const pty = launcher.handles[0]; const stop = pty.stop.bind(pty); let attempts = 0;
+    pty.stop = async () => { if (++attempts === 1) throw new Error('STOP_TREE_FAILED'); return stop(); };
+    const done = () => { const item = registry.find(summary.id); return item?.processState === 'exited' && !item.stopPending; };
+    for (let tries = 0; tries < 50 && !done(); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    const item = registry.find(summary.id)!;
+    assert.deepEqual([item.processState, item.failureCode, attempts], ['exited', 'JOB_TIMEOUT', 2]);
+  } finally { await registry.shutdown(); }
+});
+
+test('iter2 slice 1 F4: a stop at a bound that keeps failing is retried with a doubling wait, and still ends the job', async () => {
+  const launcher = new FakeLauncher();
+  const registry = new SessionRegistry({ config: fixtureConfig(), launcher, jobs: new Set(['powershell']),
+    jobLimits: { timeoutMs: 10, outputBytes: 1024 }, jobStopRetryMs: 10 });
+  try {
+    const summary = await registry.start('powershell', 120, 40);
+    const pty = launcher.handles[0]; const stop = pty.stop.bind(pty); let attempts = 0, failing = true;
+    pty.stop = async () => { attempts++; if (failing) throw new Error('STOP_TREE_FAILED'); return stop(); };
+    // A fixed 10 ms wait would make about 40 attempts in 400 ms; doubling from 10 ms makes 6 (at 0, 10, 30, 70, 150 and 310 ms).
+    await new Promise(resolve => setTimeout(resolve, 400));
+    assert.ok(attempts >= 3 && attempts <= 7, `attempts ${attempts}`);
+    failing = false;
+    const done = () => { const item = registry.find(summary.id); return item?.processState === 'exited' && !item.stopPending; };
+    for (let tries = 0; tries < 100 && !done(); tries++) await new Promise(resolve => setTimeout(resolve, 10));
+    assert.deepEqual([registry.find(summary.id)!.processState, registry.find(summary.id)!.failureCode], ['exited', 'JOB_TIMEOUT']);
+  } finally { await registry.shutdown(); }
+});
+
+test('iter2 slice 1 F4: the stop retry wait stops doubling at one minute', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const launcher = new FakeLauncher();
+  const registry = new SessionRegistry({ config: fixtureConfig(), launcher, jobs: new Set(['powershell']),
+    jobLimits: { timeoutMs: 1000, outputBytes: 1024 }, jobStopRetryMs: 16000 });
+  const settle = async () => { for (let round = 0; round < 10; round++) await new Promise(resolve => setImmediate(resolve)); };
+  let attempts = 0, failing = true;
+  try {
+    const summary = await registry.start('powershell', 120, 40);
+    const pty = launcher.handles[0]; const stop = pty.stop.bind(pty);
+    pty.stop = async () => { attempts++; if (failing) throw new Error('STOP_TREE_FAILED'); return stop(); };
+    t.mock.timers.tick(1000); await settle();
+    // Without the cap the third wait would be 64 s, so the attempt due at 60 s would not come.
+    for (const [index, wait] of [16000, 32000, 60000, 60000].entries()) {
+      t.mock.timers.tick(wait - 1); await settle(); assert.equal(attempts, index + 1, `before the ${wait} ms wait ends`);
+      t.mock.timers.tick(1); await settle(); assert.equal(attempts, index + 2, `when the ${wait} ms wait ends`);
+    }
+    // Still a minute after that; the previous test shows a stop that then succeeds ends the job.
+    t.mock.timers.tick(60000); await settle(); assert.equal(attempts, 6);
+    assert.equal(registry.find(summary.id)!.processState, 'running');
+  } finally {
+    // Let any stop succeed and fire every mocked timer before real ones return, so shutdown cannot wait on one.
+    failing = false;
+    for (let round = 0; round < 3; round++) { t.mock.timers.tick(120000); await settle(); }
+    t.mock.timers.reset(); await registry.shutdown();
+  }
+});
+
+test('a bridge-failed job that then times out keeps one failure code', async () => {
+  const launcher = new FakeLauncher();
+  const registry = new SessionRegistry({ config: fixtureConfig(), launcher, jobs: new Set(['powershell']),
+    jobLimits: { timeoutMs: 50, outputBytes: 1024 * 1024 } });
+  const summary = await registry.start('powershell', 120, 40); const record = registry.require(summary.id);
+  record.outputHandler = () => Promise.reject(new Error('FIXTURE_PARSER_FAILED'));
+  launcher.handles[0].output('x'); await record.drain(); await new Promise(resolve => setImmediate(resolve));
+  assert.equal(record.metadata.failureCode, 'TERMINAL_BRIDGE_FAILED');
+  const codes: Array<string | null> = [];
+  registry.onChange(session => codes.push(session.failureCode ?? null));
+  await new Promise(resolve => setTimeout(resolve, 100)); await record.stopOperation; await record.drain();
+  assert.equal(record.jobEnd, 'JOB_TIMEOUT'); assert.equal(registry.find(summary.id)!.processState, 'exited');
+  assert.deepEqual([...new Set(codes)], ['TERMINAL_BRIDGE_FAILED']);
+  await registry.shutdown();
+});

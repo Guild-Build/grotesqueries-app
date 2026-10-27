@@ -1,0 +1,18 @@
+{
+  "name": "@grotesqueries/host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@grotesqueries/protocol": "*",
+    "@xterm/addon-serialize": "0.13.0",
+    "@xterm/addon-unicode11": "0.8.0",
+    "@xterm/headless": "5.5.0",
+    "node-pty": "1.2.0-beta.14",
+    "ws": "^8.18.0"
+  },
+  "license": "Apache-2.0"
+}

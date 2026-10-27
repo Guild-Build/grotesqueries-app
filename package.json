@@ -1,0 +1,37 @@
+{
+  "name": "grotesqueries",
+  "version": "0.1.0-alpha.1",
+  "private": true,
+  "type": "module",
+  "description": "Local browser terminal and session host",
+  "workspaces": [
+    "app",
+    "lib/protocol",
+    "frame"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "build": "npm run build --workspace lib/protocol && npm run build --workspace frame && node bin/build.mjs",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "node bin/test.mjs",
+    "typecheck:test": "tsc -p test/tsconfig.json",
+    "setup:posix": "node dist/host/setup.js",
+    "start:posix": "node bin/start-posix.mjs",
+    "package:posix": "npm run build && node bin/package-posix.mjs",
+    "check:package:posix": "node bin/check-posix-package.mjs",
+    "package:macos": "npm run build && node bin/package-macos.mjs",
+    "check:macos-release": "node bin/check-macos-release.mjs",
+    "check:clean-linux": "node bin/check-clean-linux.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "@types/ws": "^8.5.0",
+    "esbuild": "^0.25.0",
+    "playwright-core": "1.63.0",
+    "postject": "1.0.0-alpha.6",
+    "typescript": "^5.5.0"
+  },
+  "license": "Apache-2.0"
+}

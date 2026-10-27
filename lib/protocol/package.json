@@ -1,0 +1,19 @@
+{
+  "name": "@grotesqueries/protocol",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": {
+      "grotesqueries-source": "./src/index.ts",
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json && tsc -p tsconfig.build.json --noEmit",
+    "build": "node build.mjs"
+  },
+  "license": "Apache-2.0"
+}

@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "port": 8765,
+  "allowedProjectDirectories": ["."],
+  "launchProfiles": [],
+  "terminal": {
+    "scrollbackLines": 10000,
+    "recentOutputBytes": 8388608,
+    "maxIncompleteSequenceBytes": 65536
+  },
+  "diagnostics": {
+    "directory": ".runtime/logs",
+    "maxFiles": 4,
+    "maxFileBytes": 1048576
+  }
+}

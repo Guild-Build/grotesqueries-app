@@ -1,0 +1,5 @@
+{
+  "extends": "../config/typescript.base.json",
+  "compilerOptions": { "lib": ["ES2022"], "types": ["node"] },
+  "include": ["controllers", "models", "services", "helpers", "../config/*.ts"]
+}

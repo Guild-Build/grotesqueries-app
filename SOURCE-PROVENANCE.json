@@ -1,0 +1,967 @@
+{
+  "schemaVersion": 1,
+  "license": "Apache-2.0",
+  "originalRevision": "0d8dbaf01a6febecf9d58450a051a00fef850bfb",
+  "description": "Source snapshot exported from an explicit file map. Original history and local operator data are excluded. These hashes identify the initial import, not later public edits.",
+  "files": [
+    {
+      "source": "release/source/ci.yml",
+      "path": ".github/workflows/native.yml",
+      "sha256": "bd115cdeed7fa6e7f3819f7c954f2f4dfbf4218936ae3ea19225ae144760d3ab",
+      "bytes": 1685,
+      "mode": "644"
+    },
+    {
+      "source": "release/source/gitignore",
+      "path": ".gitignore",
+      "sha256": "50c1c5a58f6d562da55293ddeaa0ab1ac4d3e9d97334692bb0fb43c7c2084f93",
+      "bytes": 62,
+      "mode": "644"
+    },
+    {
+      "source": "app/controllers/control.ts",
+      "path": "app/controllers/control.ts",
+      "sha256": "3d1a6b3f1511dac4975cb9a5909902a0b73299330915491d6771364fadfbef76",
+      "bytes": 6307,
+      "mode": "644"
+    },
+    {
+      "source": "app/controllers/input.ts",
+      "path": "app/controllers/input.ts",
+      "sha256": "51f04a3f97d8f6c977082ee37afa0bc141d2b225d30bc782941f08863e6f029a",
+      "bytes": 2870,
+      "mode": "644"
+    },
+    {
+      "source": "app/controllers/server.ts",
+      "path": "app/controllers/server.ts",
+      "sha256": "f96ade4bb953566cc79d7c62d6e6cb5051995fd9e2b788df4dc3c9f1299a4cfd",
+      "bytes": 11345,
+      "mode": "644"
+    },
+    {
+      "source": "app/controllers/transport.ts",
+      "path": "app/controllers/transport.ts",
+      "sha256": "ff49649e1880840d2b51d00157297c8d174c103325b5d5e5c02d1916286b8427",
+      "bytes": 19272,
+      "mode": "644"
+    },
+    {
+      "source": "app/helpers/assets.ts",
+      "path": "app/helpers/assets.ts",
+      "sha256": "44f505dc0dd6d6aba29b746e6406720d1547ceb9d0defc12249c61133d1664cf",
+      "bytes": 1545,
+      "mode": "644"
+    },
+    {
+      "source": "app/helpers/ready.ts",
+      "path": "app/helpers/ready.ts",
+      "sha256": "5c766dfc5e276776e3756d51dd02c157737b6b3784c696a302cf3fe7f7cf4750",
+      "bytes": 3770,
+      "mode": "644"
+    },
+    {
+      "source": "app/helpers/runtime.ts",
+      "path": "app/helpers/runtime.ts",
+      "sha256": "2ab434d851cfe1e37ea90606062d572832da72fb479ebaee7bd5ba26c030e5a5",
+      "bytes": 1234,
+      "mode": "644"
+    },
+    {
+      "source": "app/helpers/startup.ts",
+      "path": "app/helpers/startup.ts",
+      "sha256": "c0f478f124b6fa26472751f2dfbf7a1bc388d055989322443375e4fba0994d57",
+      "bytes": 306,
+      "mode": "644"
+    },
+    {
+      "source": "app/models/output-buffer.ts",
+      "path": "app/models/output-buffer.ts",
+      "sha256": "b5a3a226f75b072042679ffa42a7c1e63c07b63e5cdb41f47e7141ab65794251",
+      "bytes": 1828,
+      "mode": "644"
+    },
+    {
+      "source": "app/models/sessions.ts",
+      "path": "app/models/sessions.ts",
+      "sha256": "10e0a819a1d86a977fe751c2c15907650dfb87158d0d0897ea08431d007a7565",
+      "bytes": 15993,
+      "mode": "644"
+    },
+    {
+      "source": "app/models/snapshot.ts",
+      "path": "app/models/snapshot.ts",
+      "sha256": "5e90d1bdfc94e2565216bedda998f0ee2bca7d1ba7c4582cd6d064078ba54caf",
+      "bytes": 3308,
+      "mode": "644"
+    },
+    {
+      "source": "app/models/terminal-state.ts",
+      "path": "app/models/terminal-state.ts",
+      "sha256": "062be4ad49d873d008922148b8650926b7026bc42a590a458a2ec4b02ab28bbb",
+      "bytes": 5022,
+      "mode": "644"
+    },
+    {
+      "source": "app/native/linux-supervisor.c",
+      "path": "app/native/linux-supervisor.c",
+      "sha256": "d1afc9820e618d44c658f385e6217a9d30690837654854671c6306cd22f56b42",
+      "bytes": 10037,
+      "mode": "644"
+    },
+    {
+      "source": "app/native/macos-processes.c",
+      "path": "app/native/macos-processes.c",
+      "sha256": "0815abf2c562a88c694fcf6e760a738457f0b21b3be4c830348fad431c6948c6",
+      "bytes": 7745,
+      "mode": "644"
+    },
+    {
+      "source": "app/package.json",
+      "path": "app/package.json",
+      "sha256": "e715abf634dce6edf3e91aaa9674d9c7af06671c3e29748f4d5fe6c3b7f76e98",
+      "bytes": 409,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/diagnostics.ts",
+      "path": "app/services/diagnostics.ts",
+      "sha256": "405948afbb9675cfb1b84d4f28928cab5006454187d83dafcf6b5244e77b37b1",
+      "bytes": 361,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/fleet/contracts.ts",
+      "path": "app/services/fleet/contracts.ts",
+      "sha256": "c1ede99ebd076d1f3b99b027f2191eeb77cb0894ca969386941608e9ff90d689",
+      "bytes": 5591,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/fleet/coordinator.ts",
+      "path": "app/services/fleet/coordinator.ts",
+      "sha256": "067d4c6d739dcb005f2af0544710acdd2093dac8461c73ddf6b4b579ff08317d",
+      "bytes": 14174,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/fleet/registry.ts",
+      "path": "app/services/fleet/registry.ts",
+      "sha256": "2c4c173fa279548b4bb769dd6e581eaba38c726accb09200dd6ea3585e4c0cc3",
+      "bytes": 2721,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/fleet/worker.ts",
+      "path": "app/services/fleet/worker.ts",
+      "sha256": "a5b952c88a14cce3ae5a886f6d2eebe3922105f0e44ff0cb8b8b0b0a7052c97c",
+      "bytes": 9537,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/linux-pty.ts",
+      "path": "app/services/linux-pty.ts",
+      "sha256": "2225431a139b227aa8f52e99cc8a9a0561e6a428be5b45cfd48dee9706ede8aa",
+      "bytes": 10495,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/mac-processes.ts",
+      "path": "app/services/mac-processes.ts",
+      "sha256": "cbdb3bad579d9c60e1d0c4ad0cc4285c4c23e4a0881a754b4417cd1e4fb40e45",
+      "bytes": 9753,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/mac-pty.ts",
+      "path": "app/services/mac-pty.ts",
+      "sha256": "e0602a6ee50c9502cc5f5186a852c90079ced0bfdca0adfb84632b88269bf39c",
+      "bytes": 5946,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/native-payload.ts",
+      "path": "app/services/native-payload.ts",
+      "sha256": "7a7ffda8b89dda1d9341b12e75ac7cd32e43bb9a2650a6fd564b59e3af2372bd",
+      "bytes": 9889,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/node-pty.ts",
+      "path": "app/services/node-pty.ts",
+      "sha256": "b55f874086097ce5d972ab325a6773ecbd2c9d9441e3c3e973537a401038a28e",
+      "bytes": 5564,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/plugins.ts",
+      "path": "app/services/plugins.ts",
+      "sha256": "39876292b2f41b0ebb6671f55c34a9ab5d00318583d1e04877ec11173b6b5e4c",
+      "bytes": 9974,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/process-tree.ts",
+      "path": "app/services/process-tree.ts",
+      "sha256": "8b48fb36a70b799855fd880467157689fba23a065f3a18e109b44c04abc99ab0",
+      "bytes": 5095,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/pty.ts",
+      "path": "app/services/pty.ts",
+      "sha256": "705d3f780851194ce07bf5f87391c670a5e4200912bd37a84f6042758d2c2b02",
+      "bytes": 788,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/settings.ts",
+      "path": "app/services/settings.ts",
+      "sha256": "10561d3e7c610c24ef94ed10a2ebbb3e12cca04290500d759c252478c6f87b3f",
+      "bytes": 4914,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/setup-posix.ts",
+      "path": "app/services/setup-posix.ts",
+      "sha256": "d3df1008bf22ab528346535581cb6294e4bbd72dd01c3bcc12406a78c286360b",
+      "bytes": 2582,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/setup.ts",
+      "path": "app/services/setup.ts",
+      "sha256": "f42b699b9c5e30e639de594e19e09b72931f542d204fac37ef5233463674af1e",
+      "bytes": 6593,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/terminal-replies.ts",
+      "path": "app/services/terminal-replies.ts",
+      "sha256": "edea659481e6f943da7abd862cdbe78fdaa6d37382a676b27f0ddeb57508e814",
+      "bytes": 4435,
+      "mode": "644"
+    },
+    {
+      "source": "app/services/terminal-stream.ts",
+      "path": "app/services/terminal-stream.ts",
+      "sha256": "888016951f383b185004ceda664f3b2cc6e8e942119da1310da100c0408b7717",
+      "bytes": 1304,
+      "mode": "644"
+    },
+    {
+      "source": "app/tsconfig.json",
+      "path": "app/tsconfig.json",
+      "sha256": "5b548e255ccf7760524df25fa4d6c355fa035689b6a0b5e0f3f6c21e6d411323",
+      "bytes": 194,
+      "mode": "644"
+    },
+    {
+      "source": "bin/build.mjs",
+      "path": "bin/build.mjs",
+      "sha256": "46361d9e91f01e768f93daba45f8c1c108fcf482f80a8cc2c5eb5732105dab76",
+      "bytes": 2120,
+      "mode": "644"
+    },
+    {
+      "source": "bin/check-clean-linux.mjs",
+      "path": "bin/check-clean-linux.mjs",
+      "sha256": "cb73739525c044365a3e3891ec510a10e5a707d45d086bf93776d6376ff91d9e",
+      "bytes": 8076,
+      "mode": "644"
+    },
+    {
+      "source": "bin/check-macos-release.mjs",
+      "path": "bin/check-macos-release.mjs",
+      "sha256": "97954d0d6ec5e4093b22bdbf9c58196d41544a37ebc2473ad481a0e1dc31bca0",
+      "bytes": 8998,
+      "mode": "644"
+    },
+    {
+      "source": "bin/check-posix-package.mjs",
+      "path": "bin/check-posix-package.mjs",
+      "sha256": "1b608d3747dc05a96c9506e5d82d07228965caa4a0dbb687b143f4aedbb2bead",
+      "bytes": 14278,
+      "mode": "644"
+    },
+    {
+      "source": "bin/consumer-smoke.mjs",
+      "path": "bin/consumer-smoke.mjs",
+      "sha256": "7808ee395a2dbfe54263f2d89bcf75328162bc9a42d08009816f0e27eeaf6c7d",
+      "bytes": 16262,
+      "mode": "644"
+    },
+    {
+      "source": "bin/licenses.mjs",
+      "path": "bin/licenses.mjs",
+      "sha256": "43b334359098198ed0bcae87396a9dee507e1f345c4dc205b9a375ee0aae596a",
+      "bytes": 3150,
+      "mode": "644"
+    },
+    {
+      "source": "bin/native-build.mjs",
+      "path": "bin/native-build.mjs",
+      "sha256": "dab915fab2589d2f4bc7cc01266584d5c53f6249ca570585c6a3fa941d0682c0",
+      "bytes": 981,
+      "mode": "644"
+    },
+    {
+      "source": "bin/package-macos.mjs",
+      "path": "bin/package-macos.mjs",
+      "sha256": "a3a8f48ba5cc7b560d3c3f9f16d67937d08b58744b54899c83681655da894cb4",
+      "bytes": 22603,
+      "mode": "644"
+    },
+    {
+      "source": "bin/package-posix.mjs",
+      "path": "bin/package-posix.mjs",
+      "sha256": "5b63db979de273a3ff25ccf8cce3492d6167e0d05252e69b96851ec0e0641f90",
+      "bytes": 12377,
+      "mode": "644"
+    },
+    {
+      "source": "bin/preview.mjs",
+      "path": "bin/preview.mjs",
+      "sha256": "a389ecd936e02694b00f14889f7c39df4d86e1d147df827e35ed5caf89665ab4",
+      "bytes": 1030,
+      "mode": "644"
+    },
+    {
+      "source": "bin/runtime.mjs",
+      "path": "bin/runtime.mjs",
+      "sha256": "fd8fb864c65f44498f889e72ee42be0a5babf47f868f3e4993d3edfe641102f1",
+      "bytes": 463,
+      "mode": "644"
+    },
+    {
+      "source": "bin/start-posix.mjs",
+      "path": "bin/start-posix.mjs",
+      "sha256": "a57a315479d838d30236462af6070881f97c37049715d1e1f38f8b3017c6aac3",
+      "bytes": 462,
+      "mode": "644"
+    },
+    {
+      "source": "bin/start.mjs",
+      "path": "bin/start.mjs",
+      "sha256": "6d8dbfde01d2fb80dd172411c63783c73360b1293e72f61438a88ba9c57020ab",
+      "bytes": 751,
+      "mode": "644"
+    },
+    {
+      "source": "bin/test.mjs",
+      "path": "bin/test.mjs",
+      "sha256": "bd24aabd6244e29e675e204d4b63b096e0e08bb9c25ae8061f0782038f29bd40",
+      "bytes": 3331,
+      "mode": "644"
+    },
+    {
+      "source": "config/application.ts",
+      "path": "config/application.ts",
+      "sha256": "290f7f676e48960f52f21473d21f6c58736f6b53c6a301ec0f61ad98ca72b3aa",
+      "bytes": 15870,
+      "mode": "644"
+    },
+    {
+      "source": "config/boot.ts",
+      "path": "config/boot.ts",
+      "sha256": "18a3a4e6e5bf8f4916ba1658dd9b8fd074abc18e9db7417d3c776e4f26ffbb70",
+      "bytes": 2851,
+      "mode": "644"
+    },
+    {
+      "source": "config/composition.ts",
+      "path": "config/composition.ts",
+      "sha256": "c577def7831e06952c675ac2f6ef0f82b7604deb83d6190ffd4dfa5a0a6ba1e9",
+      "bytes": 3374,
+      "mode": "644"
+    },
+    {
+      "source": "config/fleet.ts",
+      "path": "config/fleet.ts",
+      "sha256": "c79f9b093445d0e46b383bacf7be7cba55fa11efebe85c8ce4575346bf8e363c",
+      "bytes": 5628,
+      "mode": "644"
+    },
+    {
+      "source": "release/source/grotesqueries.json",
+      "path": "config/grotesqueries.json",
+      "sha256": "a39622f47f3f93832ff1a3ef007b35d16531383384e373fcf0ea51f3f9f78503",
+      "bytes": 363,
+      "mode": "644"
+    },
+    {
+      "source": "config/grotesqueries.schema.json",
+      "path": "config/grotesqueries.schema.json",
+      "sha256": "551a514ec1fc423d1c5e9d73f145c42d5ae27d98478327ba1627bc3de757668a",
+      "bytes": 8360,
+      "mode": "644"
+    },
+    {
+      "source": "config/macos-node-entitlements.plist",
+      "path": "config/macos-node-entitlements.plist",
+      "sha256": "b43515a84c79bc0b584d0553809d6bd140304261953610711a59c86b57f9e9a6",
+      "bytes": 238,
+      "mode": "644"
+    },
+    {
+      "source": "config/preview.json",
+      "path": "config/preview.json",
+      "sha256": "c504c5d479f901ea8ae7917710fc4d03d3839565ec23567d65777d09641f4ef8",
+      "bytes": 327,
+      "mode": "644"
+    },
+    {
+      "source": "config/setup-posix.ts",
+      "path": "config/setup-posix.ts",
+      "sha256": "7e9f0a92ec811ca136969c51c2d419171d48aeb5fec03fc04f43532dd4993d3d",
+      "bytes": 601,
+      "mode": "644"
+    },
+    {
+      "source": "config/standalone.ts",
+      "path": "config/standalone.ts",
+      "sha256": "0878e8ad533225e0125bcb5df8d5ef3f04f5d3ef9fb7575825300e7c0702a83f",
+      "bytes": 3898,
+      "mode": "644"
+    },
+    {
+      "source": "config/typescript.base.json",
+      "path": "config/typescript.base.json",
+      "sha256": "36fe3278f9ce01d3d518b6e1117703f54a29b208dfbbb92a9b0e610eedb3275c",
+      "bytes": 415,
+      "mode": "644"
+    },
+    {
+      "source": "docs/clean-machine-testing.md",
+      "path": "docs/clean-machine-testing.md",
+      "sha256": "5b72d93737aa03c16c41eb5b63593ea30e2ad28d4aba7309672d4a0f856e981f",
+      "bytes": 3992,
+      "mode": "644"
+    },
+    {
+      "source": "docs/macos-signing.md",
+      "path": "docs/macos-signing.md",
+      "sha256": "e5f456b4dcd100f703fd036da60171a1a89122b8244e5fbb925688cecd439440",
+      "bytes": 6960,
+      "mode": "644"
+    },
+    {
+      "source": "release/source/platform-support.md",
+      "path": "docs/platform-support.md",
+      "sha256": "1b051d4c87f81b64a52cf4c77e5cccffabd91e2879ddd8471385cc8075fb6dae",
+      "bytes": 1738,
+      "mode": "644"
+    },
+    {
+      "source": "release/source/reuse.md",
+      "path": "docs/reuse.md",
+      "sha256": "9c2ff80c92a1a86f5fae9864596fa9f7e7b343e902597849c3d4eb1f314660c7",
+      "bytes": 2445,
+      "mode": "644"
+    },
+    {
+      "source": "frame/assets/stylesheets/application.css",
+      "path": "frame/assets/stylesheets/application.css",
+      "sha256": "c00bce84c14484237ff6cfd437277deee891f61a30c1df843197861b42ea82c8",
+      "bytes": 12783,
+      "mode": "644"
+    },
+    {
+      "source": "frame/build.mjs",
+      "path": "frame/build.mjs",
+      "sha256": "21ad878e0d35a1bd8f6e17e505c5ae0d69545edab20a07e75c2df000af476a43",
+      "bytes": 3170,
+      "mode": "644"
+    },
+    {
+      "source": "frame/package.json",
+      "path": "frame/package.json",
+      "sha256": "f75442ce6973d003a267b81a64f5cbcaa2c4857103ca5d8503a0bdf1bec5df28",
+      "bytes": 737,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/application.ts",
+      "path": "frame/src/application.ts",
+      "sha256": "411cec1b154324a82122a0ed4106a27d3b90fe97bf51cb4e6320c36024d63cf6",
+      "bytes": 55878,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/arguments.ts",
+      "path": "frame/src/arguments.ts",
+      "sha256": "fde587e3bd8a12d0ea775759396f66c193ce1de389c2754c3623ffed91c51855",
+      "bytes": 1121,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/client.ts",
+      "path": "frame/src/client.ts",
+      "sha256": "c7aa7cdf31e9b7117fcddc05df09e172f1dfa15a245a0df3bfc8ebf27b06c679",
+      "bytes": 7047,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/fleet.ts",
+      "path": "frame/src/fleet.ts",
+      "sha256": "db82a1c1003e6f59229c57174750692061fbd9757f22d574e6870ca8004623f5",
+      "bytes": 2010,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/index.html",
+      "path": "frame/src/index.html",
+      "sha256": "158516e20f082208888e52ec8f72abccd4c78503c4c2dfe98e877cf5cf03680b",
+      "bytes": 345,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/input-markers.ts",
+      "path": "frame/src/input-markers.ts",
+      "sha256": "c710d908f2fd6962cac8c6f4ffe6573344747404dd84b04c49af8a71cd4ef616",
+      "bytes": 4183,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/input.ts",
+      "path": "frame/src/input.ts",
+      "sha256": "4ae7436c95482b6bab647bbaaaef835fd2cd215e92434905f564447b5fc55789",
+      "bytes": 4607,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/preferences.ts",
+      "path": "frame/src/preferences.ts",
+      "sha256": "60142d63e11c9a0956687ee4768984c4349520a068f5adf1f49c4720326edfde",
+      "bytes": 2163,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/settings.ts",
+      "path": "frame/src/settings.ts",
+      "sha256": "7d0722988a4ff01f4caf31293c1b2d731bdcc8a09d87a7851424a38e5028ba3d",
+      "bytes": 7112,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/shell.ts",
+      "path": "frame/src/shell.ts",
+      "sha256": "4740021a799d4b395a379c473c6802502e07815909309b528e318a198ab4bb1e",
+      "bytes": 6946,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/state.ts",
+      "path": "frame/src/state.ts",
+      "sha256": "b35aa847bb89448f6dbb749fce040c0d0a933bc43b89792bdb7c446fb559dbb7",
+      "bytes": 1671,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/tabs.ts",
+      "path": "frame/src/tabs.ts",
+      "sha256": "a9300cd1c866508ae50c952c03a8a2a577e712c63dbe2d76926a855bf0c56689",
+      "bytes": 3109,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/terminal/palette.ts",
+      "path": "frame/src/terminal/palette.ts",
+      "sha256": "2338e834cbbfc529513792b7537f1d8bb19cc8366b12db5d0b9aea2c660ae89f",
+      "bytes": 685,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/terminal/replies.ts",
+      "path": "frame/src/terminal/replies.ts",
+      "sha256": "01522ab2de6523002722b1caf45d3d26b8b4973f2b8e8bef7c17a20f5d7431e5",
+      "bytes": 1588,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/terminal/stream.ts",
+      "path": "frame/src/terminal/stream.ts",
+      "sha256": "a422796e764bb341ba124382ecc8301070e43ae0873e8d57f99f56bf6bc55f3c",
+      "bytes": 6360,
+      "mode": "644"
+    },
+    {
+      "source": "frame/src/terminal/view.ts",
+      "path": "frame/src/terminal/view.ts",
+      "sha256": "e7f10975294648373afedb981bbbd673e138614344f97940e94517158b20f339",
+      "bytes": 4951,
+      "mode": "644"
+    },
+    {
+      "source": "frame/test/browser-state.test.ts",
+      "path": "frame/test/browser-state.test.ts",
+      "sha256": "fba73be85b0df45208bc987841a094b2255e6950159b78bf8448b21c4311f2ea",
+      "bytes": 7199,
+      "mode": "644"
+    },
+    {
+      "source": "frame/test/bundle-units.mjs",
+      "path": "frame/test/bundle-units.mjs",
+      "sha256": "11cf1ea6d2b204cb7b67a2621b1c99926f08dbaa5d1933e4902f2cc8447e5074",
+      "bytes": 768,
+      "mode": "644"
+    },
+    {
+      "source": "frame/test/frame.test.mjs",
+      "path": "frame/test/frame.test.mjs",
+      "sha256": "2a53a184618f04264340bc79e4e7582f8761313090b3e7dcca23493860f767c2",
+      "bytes": 4370,
+      "mode": "644"
+    },
+    {
+      "source": "frame/test/preferences.test.ts",
+      "path": "frame/test/preferences.test.ts",
+      "sha256": "289206ca1dd01531218586a12e5fd46fff28a454cbadf2d46a6d6c7eb46ffeb8",
+      "bytes": 2689,
+      "mode": "644"
+    },
+    {
+      "source": "frame/test/tabs.test.ts",
+      "path": "frame/test/tabs.test.ts",
+      "sha256": "87fef302890f45823188dc2411dda4ec8e8a3ce355c322623be90f39e9e8774b",
+      "bytes": 3204,
+      "mode": "644"
+    },
+    {
+      "source": "frame/tsconfig.json",
+      "path": "frame/tsconfig.json",
+      "sha256": "0c094cd48a2f22097206a4626027b893c9759e21f042fe63202c8cccbe9b57c2",
+      "bytes": 508,
+      "mode": "644"
+    },
+    {
+      "source": "frame/tsconfig.test.json",
+      "path": "frame/tsconfig.test.json",
+      "sha256": "3d8435109fb11bb142ee9f6ee1c5447adda70f8fdcdbf7162175730282ccff40",
+      "bytes": 131,
+      "mode": "644"
+    },
+    {
+      "source": "lib/local-web/assets.ts",
+      "path": "lib/local-web/assets.ts",
+      "sha256": "a2bec89274d2f259e012571ddc02660e4fb7cf2ba52c65dcdbf407d2cef9d31c",
+      "bytes": 1025,
+      "mode": "644"
+    },
+    {
+      "source": "lib/local-web/diagnostics.ts",
+      "path": "lib/local-web/diagnostics.ts",
+      "sha256": "add1ad03137d9afc4956e3e5bc4c2fc2cbdf513b4d69bdcfba74600dd3666dab",
+      "bytes": 2553,
+      "mode": "644"
+    },
+    {
+      "source": "lib/local-web/index.ts",
+      "path": "lib/local-web/index.ts",
+      "sha256": "551af80bfd88b8e0bc4d486d4a976e920d441c1070df3f72b7490887590a07e9",
+      "bytes": 665,
+      "mode": "644"
+    },
+    {
+      "source": "lib/local-web/package.json",
+      "path": "lib/local-web/package.json",
+      "sha256": "c696a436c540fb2784ef11b5fe8f76a641a3ecb25de6195ca6c4fca4b5e34505",
+      "bytes": 627,
+      "mode": "644"
+    },
+    {
+      "source": "lib/local-web/runtime.ts",
+      "path": "lib/local-web/runtime.ts",
+      "sha256": "ffd023b2a07c72d575cc875b620137fcc4db489328702e9c8ae41b1b2a020411",
+      "bytes": 6332,
+      "mode": "644"
+    },
+    {
+      "source": "lib/local-web/server.ts",
+      "path": "lib/local-web/server.ts",
+      "sha256": "508ee2b9e42759eb467f9d010e578065ea56ee5815c29c37317831b0cdc23a4a",
+      "bytes": 3675,
+      "mode": "644"
+    },
+    {
+      "source": "lib/local-web/startup.ts",
+      "path": "lib/local-web/startup.ts",
+      "sha256": "3ca3a0637833fefad3737061c8460dc459faaa0c3157c81981a06d51c8277757",
+      "bytes": 1632,
+      "mode": "644"
+    },
+    {
+      "source": "lib/local-web/tsconfig.build.json",
+      "path": "lib/local-web/tsconfig.build.json",
+      "sha256": "b7069be3ca5f781884da8101c245c8cedcede12408f4fbbffc1d8d1b098e4c7b",
+      "bytes": 304,
+      "mode": "644"
+    },
+    {
+      "source": "lib/protocol/bin/check.ts",
+      "path": "lib/protocol/bin/check.ts",
+      "sha256": "6728b8021b161d5a9418e3d46912224b9b9644f648fa1e75860aefc53c27298a",
+      "bytes": 2862,
+      "mode": "644"
+    },
+    {
+      "source": "lib/protocol/build.mjs",
+      "path": "lib/protocol/build.mjs",
+      "sha256": "d9f56555ba1b46de1ce785ba38b1243550770146f1485d945a44149ddb3bebbf",
+      "bytes": 924,
+      "mode": "644"
+    },
+    {
+      "source": "lib/protocol/package.json",
+      "path": "lib/protocol/package.json",
+      "sha256": "85ed47cb49b80da9f0d0593327caea516fb339d7aef0ca308a00802b73ea8774",
+      "bytes": 442,
+      "mode": "644"
+    },
+    {
+      "source": "lib/protocol/src/index.ts",
+      "path": "lib/protocol/src/index.ts",
+      "sha256": "31628c5059c34bff1224ca67b34fec00b00794b52bc5785b94300ebf33bd40b7",
+      "bytes": 6786,
+      "mode": "644"
+    },
+    {
+      "source": "lib/protocol/src/plugin-imports.ts",
+      "path": "lib/protocol/src/plugin-imports.ts",
+      "sha256": "bd7f7580066822bf14abc609a5e98423db5e3db61efe74847ef6a897addeba1c",
+      "bytes": 2341,
+      "mode": "644"
+    },
+    {
+      "source": "lib/protocol/src/settings.ts",
+      "path": "lib/protocol/src/settings.ts",
+      "sha256": "a5d005c9f8cf2c91ed240805a926ce04d148167b2c0f2138c0105c7b17507c71",
+      "bytes": 591,
+      "mode": "644"
+    },
+    {
+      "source": "lib/protocol/src/terminal-queries.ts",
+      "path": "lib/protocol/src/terminal-queries.ts",
+      "sha256": "f9f80a365aa3942a707bf1c1976dafa4fcc54b1931a57ed14bd4342b3f2c0a06",
+      "bytes": 485,
+      "mode": "644"
+    },
+    {
+      "source": "lib/protocol/src/terminal-state-adapter.ts",
+      "path": "lib/protocol/src/terminal-state-adapter.ts",
+      "sha256": "4f65ecc3119e8676b7d1a921e8261eb9cd11f14cfc84659055458904312032e0",
+      "bytes": 8519,
+      "mode": "644"
+    },
+    {
+      "source": "lib/protocol/src/validation.ts",
+      "path": "lib/protocol/src/validation.ts",
+      "sha256": "6dc263ca1ce6a8d40c57cba3ea14185f63aadf783fd341ba106883cf9e30db78",
+      "bytes": 17081,
+      "mode": "644"
+    },
+    {
+      "source": "lib/protocol/test/contract.test.mjs",
+      "path": "lib/protocol/test/contract.test.mjs",
+      "sha256": "0bd67d71ea8d8c68ef3dfec5e615432afdde8f071c6d41ef31675bc77466bf2f",
+      "bytes": 11349,
+      "mode": "644"
+    },
+    {
+      "source": "lib/protocol/tsconfig.build.json",
+      "path": "lib/protocol/tsconfig.build.json",
+      "sha256": "eb8ba40fd8bec2e328547b34b51ed551af9beeeab8774a746b57a1df920fc875",
+      "bytes": 349,
+      "mode": "644"
+    },
+    {
+      "source": "lib/protocol/tsconfig.json",
+      "path": "lib/protocol/tsconfig.json",
+      "sha256": "cf52d6f968d3820786f8f0592b975fce5e246e0e1cd12555766da7aaa2cf2efe",
+      "bytes": 132,
+      "mode": "644"
+    },
+    {
+      "source": "LICENSE",
+      "path": "LICENSE",
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+      "bytes": 11358,
+      "mode": "644"
+    },
+    {
+      "source": "package-lock.json",
+      "path": "package-lock.json",
+      "sha256": "a19177356c43d77ad357b7d248bb88de125fb4884d3791ce07a1e10689dc1eed",
+      "bytes": 22749,
+      "mode": "644"
+    },
+    {
+      "source": "release/source/package.json",
+      "path": "package.json",
+      "sha256": "95e214998f3d7382512947706ebcbc5aaa63b818966d957570f7836b549903c7",
+      "bytes": 1188,
+      "mode": "644"
+    },
+    {
+      "source": "release/source/README.md",
+      "path": "README.md",
+      "sha256": "5389596f67e4049f8de4c3411766073740b7fdf47f46c6bbb9d1669e49bdacaa",
+      "bytes": 2822,
+      "mode": "644"
+    },
+    {
+      "source": "test/controllers/control-input.test.ts",
+      "path": "test/controllers/control-input.test.ts",
+      "sha256": "a8cbb7def82c237cacf878a78d6f6ab649c29520b28752e3fbdaa2c989257369",
+      "bytes": 7322,
+      "mode": "644"
+    },
+    {
+      "source": "test/integration/bridge.test.ts",
+      "path": "test/integration/bridge.test.ts",
+      "sha256": "dfe51a3e22bb3266acea8c422c4abb78f4f1917d5dff8b4dd34cc0145b9bf058",
+      "bytes": 11950,
+      "mode": "644"
+    },
+    {
+      "source": "test/integration/consumer-smoke.test.mjs",
+      "path": "test/integration/consumer-smoke.test.mjs",
+      "sha256": "54fed26e3f4e9079a8cba4c304127892a83b4ee3d099895bfffed7233f20ef20",
+      "bytes": 1603,
+      "mode": "644"
+    },
+    {
+      "source": "test/integration/macos-release.test.mjs",
+      "path": "test/integration/macos-release.test.mjs",
+      "sha256": "ec59b4afa656b342d3fa1a9c842954076e5fb71e26cb0afc4db0b08af05fda9d",
+      "bytes": 15945,
+      "mode": "644"
+    },
+    {
+      "source": "test/integration/portable-host.test.mjs",
+      "path": "test/integration/portable-host.test.mjs",
+      "sha256": "cb3debd655b99453c3c2e66a8a9bfc5268ddd2b0719c154e6acf0eab0426dbfb",
+      "bytes": 8719,
+      "mode": "644"
+    },
+    {
+      "source": "test/integration/posix-package.test.mjs",
+      "path": "test/integration/posix-package.test.mjs",
+      "sha256": "c326eed129e8e68feaef31570275383ebdc98de39094a86457cdf229c65526d7",
+      "bytes": 2057,
+      "mode": "644"
+    },
+    {
+      "source": "test/integration/protocol.test.ts",
+      "path": "test/integration/protocol.test.ts",
+      "sha256": "b711289c6f50e2437de512044e9bc70809878bdd94d585e4ddb500c2ff90a708",
+      "bytes": 4499,
+      "mode": "644"
+    },
+    {
+      "source": "test/models/sessions.test.ts",
+      "path": "test/models/sessions.test.ts",
+      "sha256": "f5948211e87d8dddc03fb919cd996d11cb76e070f53e0dc0133ea62322fe64d4",
+      "bytes": 18415,
+      "mode": "644"
+    },
+    {
+      "source": "test/services/linux-native.test.ts",
+      "path": "test/services/linux-native.test.ts",
+      "sha256": "1e44812f31b2a9ed6e839ba22c11737c6105a1e87118622ead742b5804fe6f51",
+      "bytes": 14721,
+      "mode": "644"
+    },
+    {
+      "source": "test/services/mac-native.test.ts",
+      "path": "test/services/mac-native.test.ts",
+      "sha256": "3d7c33491182a6d46fc07acc0e5ddd9db79ee990c1610195d8d0f50de7abb56e",
+      "bytes": 20548,
+      "mode": "644"
+    },
+    {
+      "source": "test/services/native-payload.test.ts",
+      "path": "test/services/native-payload.test.ts",
+      "sha256": "44d0cca4ff9af6769d7a94c9d9f940d4d0267d469c85a4c4360fbb6d7e44eb77",
+      "bytes": 1375,
+      "mode": "644"
+    },
+    {
+      "source": "test/services/portable-files.test.ts",
+      "path": "test/services/portable-files.test.ts",
+      "sha256": "3a4c02ada6ea9351b637c94a67ac5131c37d2e7d8a8a0a6eac0a28766f9a4c68",
+      "bytes": 3921,
+      "mode": "644"
+    },
+    {
+      "source": "test/services/posix-config.test.ts",
+      "path": "test/services/posix-config.test.ts",
+      "sha256": "8a876d38712b5cb80d01e928561aa0e493525bb187e242496c01e2647b98fa7e",
+      "bytes": 6131,
+      "mode": "644"
+    },
+    {
+      "source": "test/services/posix-runtime.test.ts",
+      "path": "test/services/posix-runtime.test.ts",
+      "sha256": "1dcb362032e379cf1d6c6a684ab9769d01fd5439bae6c826fce5c80f94911589",
+      "bytes": 4705,
+      "mode": "644"
+    },
+    {
+      "source": "test/services/posix-setup.test.ts",
+      "path": "test/services/posix-setup.test.ts",
+      "sha256": "75ced115539e1e3692e7a11e3008e450e028ffb74ff7d0e6dcdc07889a2e5164",
+      "bytes": 2454,
+      "mode": "644"
+    },
+    {
+      "source": "test/support/bridge-fixture.ts",
+      "path": "test/support/bridge-fixture.ts",
+      "sha256": "23748fedc4e4660e454f773bcd0526d5ea58f69d4a4f74770f313c335a06e06a",
+      "bytes": 7686,
+      "mode": "644"
+    },
+    {
+      "source": "test/support/helpers.ts",
+      "path": "test/support/helpers.ts",
+      "sha256": "a046c7a67be5d25f502f18f43f96e6873471e18585c631f16bfa2b4a67b23629",
+      "bytes": 3295,
+      "mode": "644"
+    },
+    {
+      "source": "test/support/renderer-replies.ts",
+      "path": "test/support/renderer-replies.ts",
+      "sha256": "966f732f6e01273e6625cc18c93e37036d54cdcc892a92bf2e074db20346db71",
+      "bytes": 1965,
+      "mode": "644"
+    },
+    {
+      "source": "test/support/scratch.ts",
+      "path": "test/support/scratch.ts",
+      "sha256": "2f543b1b0a394d89e2848d947e9fb043e3f731f55f1131ed79d36c53cffb4edc",
+      "bytes": 1154,
+      "mode": "644"
+    },
+    {
+      "source": "test/tsconfig.json",
+      "path": "test/tsconfig.json",
+      "sha256": "58a064ff86e29d03c84367b978755363deee7c8c504f39422d625c2124c1206b",
+      "bytes": 146,
+      "mode": "644"
+    },
+    {
+      "source": "THIRD_PARTY_NOTICES.md",
+      "path": "THIRD_PARTY_NOTICES.md",
+      "sha256": "ccdad25d2bedcaabd484461cdc38a6b5a89cb9b0afa02905944ecc82e524f57a",
+      "bytes": 4216,
+      "mode": "644"
+    },
+    {
+      "source": "vendor/licenses/node-v24.14.1-LICENSE.txt",
+      "path": "vendor/licenses/node-v24.14.1-LICENSE.txt",
+      "sha256": "4573185d56580da2b890ba34a85a409257640f1c5632eade4300137266194d18",
+      "bytes": 156926,
+      "mode": "644"
+    }
+  ]
+}
