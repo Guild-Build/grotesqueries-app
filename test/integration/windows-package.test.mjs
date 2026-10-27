@@ -4,7 +4,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import test from 'node:test';
 import { windowsZip, stripAuthenticodeSignature, defaultWindowsConfiguration } from '../../bin/package-windows.mjs';
-import { cleanupWindowsConsumer, readWindowsZip, verifyWindowsFiles } from '../../bin/consumer-windows.mjs';
+import { cleanupWindowsConsumer, readWindowsZip, verifyUnsignedWindowsArchive, verifyWindowsFiles } from '../../bin/consumer-windows.mjs';
+import { assertNoEmbeddedAuthenticode, inspectWindowsPE } from '../../bin/windows-pe.mjs';
 import { seaConfig } from '../../bin/sea-config.mjs';
 import { frameAssets, FRAME_FILES } from '../../bin/frame-assets.mjs';
 
@@ -47,6 +48,7 @@ test('Windows ZIP producer and consumer refuse path aliases, corruption, links a
 function executableFixture() {
   const bytes = Buffer.alloc(544), pe = 128, optional = pe + 24;
   bytes.writeUInt16LE(0x5a4d); bytes.writeUInt32LE(pe, 0x3c); bytes.writeUInt32LE(0x4550, pe);
+  bytes.writeUInt16LE(1, pe + 6);
   bytes.writeUInt16LE(0x8664, pe + 4); bytes.writeUInt16LE(240, pe + 20); bytes.writeUInt16LE(0x20b, optional);
   bytes.writeUInt32LE(16, optional + 108); bytes.writeUInt32LE(512, optional + 144); bytes.writeUInt32LE(32, optional + 148);
   bytes.fill(0xcd, 512); return bytes;
@@ -62,6 +64,39 @@ test('SEA packaging removes only a trailing Authenticode certificate from the co
   const wrongArchitecture = executableFixture(); wrongArchitecture.writeUInt16LE(0xaa64, 132);
   assert.throws(() => stripAuthenticodeSignature(wrongArchitecture), /WINDOWS_PE_INVALID/);
   assert.throws(() => stripAuthenticodeSignature(Buffer.alloc(60)), /WINDOWS_PE_INVALID/);
+});
+
+test('unsigned PE inspection is read-only and rejects signatures, missing directories and malformed header bounds', () => {
+  const signed = executableFixture(), originalSigned = Buffer.from(signed);
+  assert.throws(() => assertNoEmbeddedAuthenticode(signed), /WINDOWS_EMBEDDED_AUTHENTICODE_PRESENT/);
+  assert.deepEqual(signed, originalSigned);
+  const unsigned = stripAuthenticodeSignature(signed), before = Buffer.from(unsigned);
+  assertNoEmbeddedAuthenticode(unsigned); assert.deepEqual(unsigned, before);
+  assert.equal(inspectWindowsPE(unsigned).certificateOffset, 0);
+  for (const mutate of [
+    bytes => bytes.writeUInt32LE(0xffffffff, 0x3c),
+    bytes => bytes.writeUInt16LE(0x10b, 128 + 24),
+    bytes => bytes.writeUInt16LE(0xaa64, 128 + 4),
+    bytes => bytes.writeUInt32LE(4, 128 + 24 + 108),
+    bytes => bytes.writeUInt16LE(152, 128 + 20),
+    bytes => bytes.writeUInt16LE(97, 128 + 6),
+    bytes => bytes.writeUInt32LE(1024, 128 + 24 + 240 + 16),
+  ]) { const bytes = Buffer.from(unsigned); mutate(bytes); assert.throws(() => assertNoEmbeddedAuthenticode(bytes), /WINDOWS_PE_INVALID/); }
+  for (const [offset, size] of [[512, 0], [0, 32], [512, 32]]) {
+    const bytes = Buffer.from(unsigned); bytes.writeUInt32LE(offset, 128 + 24 + 144); bytes.writeUInt32LE(size, 128 + 24 + 148);
+    assert.throws(() => assertNoEmbeddedAuthenticode(bytes), /WINDOWS_EMBEDDED_AUTHENTICODE_PRESENT/);
+  }
+});
+
+test('unsigned archive evidence covers final PE bytes and excludes shipped catalogs without OS trust claims', () => {
+  const top = 'grotesqueries-0.1.0-alpha.2-win32-x64';
+  const entries = ['BUILD-METADATA.json', 'LICENSE', 'README.txt', 'SHA256SUMS', 'THIRD_PARTY_NOTICES.md', 'grotesqueries.exe', 'grotesqueries.json', 'licenses.txt']
+    .map(file => ({ name: top + '/' + file, bytes: file === 'grotesqueries.exe' ? stripAuthenticodeSignature(executableFixture()) : Buffer.from('fixture') }));
+  assert.deepEqual(verifyUnsignedWindowsArchive(entries).signingEvidence,
+    { embeddedAuthenticode: 'absent', shippedCatalog: 'absent', operatingSystemTrust: 'not-evaluated' });
+  assert.throws(() => verifyUnsignedWindowsArchive([...entries, { name: top + '/signing.cat', bytes: Buffer.from('catalog fixture') }]));
+  assert.throws(() => verifyUnsignedWindowsArchive(entries.map(entry => entry.name.endsWith('/grotesqueries.exe') ? { ...entry, bytes: executableFixture() } : entry)),
+    /WINDOWS_EMBEDDED_AUTHENTICODE_PRESENT/);
 });
 
 test('Windows file manifest covers all runtime files, detects alteration and permits only configured JSON to change', () => fixture(folder => {

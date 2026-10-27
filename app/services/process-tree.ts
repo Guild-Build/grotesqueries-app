@@ -11,6 +11,13 @@ const clockTickMs = 16;
 export interface ProcessSnapshotRow { ProcessId: number; ParentProcessId: number; CreationDate: string }
 type CommandOptions = { timeout: number; maxBuffer: number };
 export type WindowsProcessCommand = (phase: 'snapshot' | 'stop', source: string, options: CommandOptions) => Promise<{ stdout: string; stderr?: string }>;
+type CommandDiagnostics = { phase: 'snapshot' | 'stop'; kind: string; elapsedMs: number; timeoutMs: number;
+  code: string | number | null; signal: string | null; killed: boolean; stdoutBytes: number; stderrBytes: number };
+class WindowsProcessCommandFailure extends Error {
+  constructor(readonly code: string, readonly diagnostics: CommandDiagnostics, cause: Error) {
+    super(code + ': Owned process metadata or cleanup was not verified; retry deliberately.', { cause });
+  }
+}
 const executeWindowsCommand: WindowsProcessCommand = (_phase, source, options) => execute(resolveExecutable(powershell),
   ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', source], { windowsHide: true, ...options });
 const snapshotSource = "$ErrorActionPreference='Stop'; Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate -ErrorAction Stop | " +
@@ -32,8 +39,7 @@ async function runCommand(phase: 'snapshot' | 'stop', source: string, options: C
       code, signal, killed, stdoutBytes: bytes(failure.stdout), stderrBytes: bytes(failure.stderr) };
     const cause = Object.assign(new Error('Windows process command failed; output contents are omitted.'), diagnostics);
     const label = phase === 'snapshot' ? 'STOP_SNAPSHOT_QUERY_FAILED' : 'STOP_TREE_FAILED';
-    throw Object.assign(new Error(label + ': Owned process metadata or cleanup was not verified; retry deliberately.', { cause }),
-      { code: label, diagnostics });
+    throw new WindowsProcessCommandFailure(label, diagnostics, cause);
   }
 }
 function invalidSnapshot(kind: string, stdout: string, stderr: string | undefined, elapsedMs: number, timeoutMs: number): never {
@@ -72,9 +78,18 @@ export async function stopProcessTree(ownedPid: number, ownership: ProcessTreeOw
   executeCommand: WindowsProcessCommand = executeWindowsCommand): Promise<number[]> {
   if (!Number.isSafeInteger(ownedPid) || ownedPid <= 0) throw new Error('STOP_INVALID_OWNED_PROCESS');
   const deadline = Date.now() + 15000;
+  let snapshotRetried = false;
   // Retain identities before effects, including on failure. Root exit never ends tree ownership.
   while (Date.now() < deadline) {
-    const list = await getProcessSnapshot(Math.min(5000, Math.max(1, deadline - Date.now())), executeCommand);
+    let list: ProcessSnapshotRow[];
+    try { list = await getProcessSnapshot(Math.min(5000, Math.max(1, deadline - Date.now())), executeCommand); }
+    catch (error) {
+      // A cold CIM query can consume its command budget. Retry that read once,
+      // within the original overall deadline; no partial metadata authorizes effects.
+      if (!snapshotRetried && error instanceof WindowsProcessCommandFailure && error.diagnostics.phase === 'snapshot' &&
+        error.diagnostics.kind === 'timeout' && Date.now() < deadline) { snapshotRetried = true; continue; }
+      throw error;
+    }
     const current = new Map(list.map(item => [item.ProcessId, item])); const root = current.get(ownedPid);
     if (root && !ownership.processes.has(ownedPid) &&
       Date.parse(root.CreationDate) >= (ownership.createdAfter ?? 0) - clockTickMs &&

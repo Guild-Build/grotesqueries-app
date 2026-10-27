@@ -14,6 +14,8 @@ import { distributionMetadata } from './licenses.mjs';
 import { runtimeEnvironment } from './runtime.mjs';
 import { frameAssets } from './frame-assets.mjs';
 import { seaConfig } from './sea-config.mjs';
+import { assertNoEmbeddedAuthenticode, stripAuthenticodeSignature } from './windows-pe.mjs';
+export { stripAuthenticodeSignature } from './windows-pe.mjs';
 
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 
@@ -23,27 +25,6 @@ export function defaultWindowsConfiguration() {
       args: ['-NoLogo', '-NoProfile'], projectDirectory: '.', environment: {} }],
     terminal: { scrollbackLines: 10000, recentOutputBytes: 8388608, maxIncompleteSequenceBytes: 65536 },
     diagnostics: { directory: '.runtime/logs', maxFiles: 4, maxFileBytes: 1048576 } };
-}
-
-/** The PE security directory holds a file offset, not an RVA. Never retain Node's signature after injection. */
-export function stripAuthenticodeSignature(input) {
-  const bytes = Buffer.from(input);
-  const invalid = () => { throw new Error('WINDOWS_PE_INVALID'); };
-  if (bytes.length < 64 || bytes.readUInt16LE(0) !== 0x5a4d) invalid();
-  const pe = bytes.readUInt32LE(0x3c);
-  if (pe < 64 || pe + 24 > bytes.length || bytes.readUInt32LE(pe) !== 0x00004550) invalid();
-  const optional = pe + 24, size = bytes.readUInt16LE(pe + 20);
-  if (size < 152 || optional + size > bytes.length || bytes.readUInt16LE(optional) !== 0x20b ||
-    bytes.readUInt16LE(pe + 4) !== 0x8664 || bytes.readUInt32LE(optional + 108) < 5) invalid();
-  const directory = optional + 112 + 4 * 8;
-  const offset = bytes.readUInt32LE(directory), length = bytes.readUInt32LE(directory + 4);
-  if (!offset && !length) return bytes;
-  if (!offset || !length || offset % 8 || offset < optional + size || offset + length !== bytes.length) {
-    throw new Error('WINDOWS_CERTIFICATE_LAYOUT_UNSUPPORTED');
-  }
-  bytes.fill(0, directory, directory + 8);
-  bytes.writeUInt32LE(0, optional + 64);
-  return bytes.subarray(0, offset);
 }
 
 /** Stable file order, timestamps and compression for a given set of release bytes. No ZIP64 or links. */
@@ -123,7 +104,7 @@ export async function packageWindows() {
     fs.writeFileSync(executable, stripAuthenticodeSignature(nodeBytes), { flag: 'wx' });
     await inject(executable, 'NODE_SEA_BLOB', regular(blob), { sentinelFuse: 'NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2' });
     const executableBytes = regular(executable);
-    if (stripAuthenticodeSignature(executableBytes).length !== executableBytes.length) throw new Error('WINDOWS_PACKAGE_SIGNATURE_REMAINS');
+    assertNoEmbeddedAuthenticode(executableBytes);
     const sourceRevision = execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root, encoding: 'utf8' }).trim();
     const sourceDirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { cwd: root, encoding: 'utf8' }).trim() !== '';
     const buildMetadata = { application: metadata.name, version: metadata.version, releaseChannel: 'native-alpha',

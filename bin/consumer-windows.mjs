@@ -10,10 +10,21 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { inflateRawSync, crc32 } from 'node:zlib';
 import WebSocket from 'ws';
+import { assertNoEmbeddedAuthenticode } from './windows-pe.mjs';
 
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
 const required = ['BUILD-METADATA.json', 'LICENSE', 'README.txt', 'SHA256SUMS', 'THIRD_PARTY_NOTICES.md', 'grotesqueries.exe', 'grotesqueries.json', 'licenses.txt'];
+
+/** Inspect the complete artifact without a network-capable OS trust lookup. */
+export function verifyUnsignedWindowsArchive(entries) {
+  const top = entries[0]?.name.split('/')[0];
+  assert.match(top ?? '', /^grotesqueries-\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?-win32-x64$/);
+  assert.deepEqual(entries.map(entry => entry.name.slice(top.length + 1)).sort(), [...required].sort());
+  assert.ok(entries.every(entry => entry.name.startsWith(top + '/')));
+  assertNoEmbeddedAuthenticode(entries.find(entry => entry.name === top + '/grotesqueries.exe').bytes);
+  return { top, signingEvidence: { embeddedAuthenticode: 'absent', shippedCatalog: 'absent', operatingSystemTrust: 'not-evaluated' } };
+}
 
 /** Validate both ZIP headers before creating files. This accepts only our bounded, regular-file archive format. */
 export function readWindowsZip(input) {
@@ -217,10 +228,7 @@ export async function checkWindowsArchive(archive) {
   archive = path.resolve(archive);
   const bytes = fs.readFileSync(archive), archiveSha256 = hash(bytes);
   assert.equal(fs.readFileSync(archive + '.sha256', 'utf8').trim(), `${archiveSha256}  ${path.basename(archive)}`, 'Archive checksum');
-  const entries = readWindowsZip(bytes), top = entries[0].name.split('/')[0];
-  assert.match(top, /^grotesqueries-\d+\.\d+\.\d+(?:-[A-Za-z0-9.-]+)?-win32-x64$/);
-  assert.deepEqual(entries.map(entry => entry.name.slice(top.length + 1)).sort(), [...required].sort());
-  assert.ok(entries.every(entry => entry.name.startsWith(top + '/')));
+  const entries = readWindowsZip(bytes), { top, signingEvidence } = verifyUnsignedWindowsArchive(entries);
   const temporary = path.join(process.cwd(), '.runtime/tmp'); fs.mkdirSync(temporary, { recursive: true });
   if (fs.lstatSync(temporary).isSymbolicLink()) throw new Error('WINDOWS_CONSUMER_TEMP_SYMLINK');
   const scratch = fs.mkdtempSync(path.join(temporary, 'windows-consumer-'));
@@ -249,7 +257,6 @@ export async function checkWindowsArchive(archive) {
     assert.match(metadata.sourceRevision, /^[a-f0-9]{40}$/); assert.equal(metadata.sourceDirty, false); assert.equal(metadata.signing, 'unsigned');
     assert.equal(metadata.executableSha256, hash(fs.readFileSync(executable)));
     assert.equal(path.basename(archive), `grotesqueries-${metadata.version}-win32-x64.zip`);
-    assert.equal(runPowerShell(powershell, `(Get-AuthenticodeSignature -LiteralPath ${quote(executable)}).Status.ToString()`, options), 'NotSigned');
     execFileSync(executable, ['--setup'], { ...options, windowsHide: true, timeout: 15000, stdio: 'pipe' });
     const configFile = path.join(folder, 'grotesqueries.json'), config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
     assert.equal(fs.existsSync(path.join(folder, '.runtime/host-ready.json')), false, 'Setup does not start the host');
@@ -370,9 +377,9 @@ export async function checkWindowsArchive(archive) {
     assert.match(diagnostics, /host-stop/); assert.doesNotMatch(diagnostics, /HOST_SHUTDOWN_FAILED/);
     const result = { consumerChecked: true, archive: path.basename(archive), archiveSha256, platform: process.platform, architecture: process.arch,
       kernel: os.release(), version: metadata.version, sourceRevision: metadata.sourceRevision, sourceDirty: metadata.sourceDirty,
-      signing: metadata.signing, nativeCleanup: metadata.nativeCleanup, runtime: 'embedded-node-' + metadata.node,
+      signing: metadata.signing, signingEvidence, nativeCleanup: metadata.nativeCleanup, runtime: 'embedded-node-' + metadata.node,
       checkerRuntime: process.version, freshArtifactOnly: true, files: required.length,
-      checks: ['archive-checksum', 'contained-zip', 'file-checksums', 'unsigned-authenticode-status', 'relocated-exe', 'system-only-path',
+      checks: ['archive-checksum', 'contained-zip', 'file-checksums', 'no-embedded-authenticode', 'no-shipped-catalog', 'relocated-exe', 'system-only-path',
         'setup-no-spawn', 'setup-preservation', 'embedded-assets-and-licenses', 'origin-rejection', 'empty-startup', 'authenticated-native-pty',
         'observer-input-refusal', 'unicode-roundtrip', 'native-resize', 'disconnect-survival', 'observing-reconnect', 'retained-screen',
         'natural-root-exit-retains-cleanup', 'root-exit-during-stop', 'detached-descendant-cleanup', 'sibling-survival', 'native-stop', 'real-console-ctrl-c', 'graceful-host-cleanup'] };

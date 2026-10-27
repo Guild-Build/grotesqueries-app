@@ -126,10 +126,11 @@ class Peer {
     socket.on('error', error => { this.error = error; }); socket.on('close', () => { this.closed = true; });
   }
   send(frame) { this.socket.send(JSON.stringify(frame)); }
-  async wait(predicate, label) { await until(() => { if (this.error) throw this.error; if (this.closed) fail('socket closed'); return predicate(); }, label); }
+  async wait(predicate, label, milliseconds = 15000) { await until(() => { if (this.error) throw this.error; if (this.closed) fail('socket closed'); return predicate(); }, label, milliseconds); }
   async request(type, fields = {}, resultType = 'operation-result') {
     const requestId = ++this.id; this.send({ type, requestId, ...fields }); let result;
-    await this.wait(() => (result = this.frames.find(frame => frame.requestId === requestId && [resultType, 'error'].includes(frame.type))), type);
+    // Stop can use 15 seconds for the tree and 5 seconds to drain the PTY; match the baseline consumer's response budget.
+    await this.wait(() => (result = this.frames.find(frame => frame.requestId === requestId && [resultType, 'error'].includes(frame.type))), type, type === 'stop' ? 30000 : 15000);
     if (result.type === 'error') fail('fixture operation ' + type + ': ' + result.code);
     return result;
   }

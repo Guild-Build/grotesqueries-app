@@ -8,6 +8,9 @@ import { NodePtyLauncher } from '../../app/services/node-pty.js';
 import type { PtyHandle } from '../../app/services/pty.js';
 
 const skip = process.platform !== 'win32';
+const observationBudgetMs = 15000, stopAndDrainBudgetMs = 15000 + 5000;
+// Four bounded observations plus body/finally Stop attempts and native startup.
+const workerBudgetMs = 7000 + 4 * observationBudgetMs + 2 * stopAndDrainBudgetMs;
 const alive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false; throw error; }
@@ -44,7 +47,7 @@ function recordError(error: unknown, depth = 0): ErrorRecord {
 const restoredError = ({ message, stack, cause, ...metadata }: ErrorRecord): Error => Object.assign(
   new Error(message, cause ? { cause: restoredError(cause) } : undefined), { stack, ...metadata });
 async function until(predicate: () => boolean, description: string): Promise<void> {
-  const deadline = Date.now() + 15000;
+  const deadline = Date.now() + observationBudgetMs;
   while (!predicate()) { if (Date.now() >= deadline) throw new Error('WINDOWS_NATIVE_TIMEOUT: ' + description); await new Promise(resolve => setTimeout(resolve, 20)); }
 }
 async function launch(source: string, directory: string, stopTree?: ConstructorParameters<typeof NodePtyLauncher>[2]): Promise<PtyHandle> {
@@ -125,7 +128,7 @@ async function isolated(name: string, directory: string): Promise<void> {
   child.stdout?.on('data', data => { output = (output + data).slice(-65536); });
   child.stderr?.on('data', data => { errors = (errors + data).slice(-65536); });
   child.on('message', value => { if (value && typeof value === 'object' && (value as CaseReport).name === name) report = value as CaseReport; });
-  const timer = setTimeout(() => { timedOut = true; child.kill(); }, 40000);
+  const timer = setTimeout(() => { timedOut = true; child.kill(); }, workerBudgetMs);
   let code: number | null;
   try { [code] = await once(child, 'exit') as [number | null]; }
   finally { clearTimeout(timer); }
@@ -184,8 +187,8 @@ if (worker) {
       assert.equal(JSON.parse(fs.readFileSync(path.join(failed, 'case-report.json'), 'utf8')).cleanupVerified, false);
     } finally { fs.rmSync(failed, { recursive: true, force: true }); }
   });
-  test('Windows natural root exit retains child/grandchild ownership and late exit subscribers until verified Stop', { skip, timeout: 45000 },
+  test('Windows natural root exit retains child/grandchild ownership and late exit subscribers until verified Stop', { skip, timeout: workerBudgetMs + 5000 },
     () => isolated('natural-exit', fixtureDirectory()));
-  test('Windows failed Stop remains retryable after primary exit and does not clear cleanup evidence', { skip, timeout: 45000 },
+  test('Windows failed Stop remains retryable after primary exit and does not clear cleanup evidence', { skip, timeout: workerBudgetMs + 5000 },
     () => isolated('failed-stop', fixtureDirectory()));
 }

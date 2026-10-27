@@ -26,6 +26,13 @@ claim of an Authenticode identity. The copied Node executable's original
 signature is removed before adding the application's SEA payload; the installed
 Node binary is never changed.
 
+Qualification inspects the final PE32+ x64 bytes without modifying them. The
+certificate directory must be present with zero offset and size, and the closed
+ZIP inventory excludes catalog files. Reports record `no-embedded-authenticode`
+and `no-shipped-catalog`. This is artifact evidence; Windows trust policy and the
+machine's installed catalog database are not evaluated. The checker does not run
+`Get-AuthenticodeSignature`, which can perform network-capable trust lookups.
+
 The adapter needs Windows x64 with ConPTY, build 18309 or later. Qualification
 reports identify the actual OS/kernel tested; a Windows Server 2022 runner pass
 does not establish every Windows desktop version or enterprise configuration.

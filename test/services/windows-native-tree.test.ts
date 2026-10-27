@@ -118,3 +118,80 @@ test('a snapshot consuming the overall cleanup budget never initiates a stop com
     assert.deepEqual([...retained.processes], [[root.ProcessId, root.CreationDate], [child.ProcessId, child.CreationDate]]);
   } finally { Date.now = originalNow; }
 });
+
+const timedOut = () => Object.assign(new Error('owned snapshot command timeout'), { code: null, signal: 'SIGTERM', killed: true, stdout: '', stderr: '' });
+test('one typed snapshot timeout retries only the read, then signals after complete validation', async () => {
+  const originalNow = Date.now; let now = 1000, snapshots = 0, effects = 0;
+  const retained = ownership();
+  try {
+    Date.now = () => now;
+    const verified = await stopProcessTree(root.ProcessId, retained, async (phase, _source, options) => {
+      assert.ok(options.timeout >= 1 && options.timeout <= 5000);
+      if (phase === 'snapshot') {
+        snapshots++;
+        if (snapshots === 1) { now += 5000; assert.equal(effects, 0); throw timedOut(); }
+        if (snapshots === 2) { assert.equal(effects, 0); return { stdout: JSON.stringify([root, child]) }; }
+        return { stdout: JSON.stringify([sibling]) };
+      }
+      assert.equal(snapshots, 2); effects++; return { stdout: '' };
+    });
+    assert.deepEqual(verified, [root.ProcessId, child.ProcessId]); assert.equal(snapshots, 3); assert.equal(effects, 1);
+  } finally { Date.now = originalNow; }
+});
+
+test('two typed snapshot timeouts fail without signals and retain known generations', async () => {
+  const originalNow = Date.now; let now = 1000, snapshots = 0, effects = 0;
+  const retained: ProcessTreeOwnership = { ...ownership(), processes: new Map([[root.ProcessId, root.CreationDate]]) };
+  try {
+    Date.now = () => now;
+    await assert.rejects(stopProcessTree(root.ProcessId, retained, async (phase, _source, options) => {
+      if (phase === 'stop') { effects++; return { stdout: '' }; }
+      snapshots++; now += options.timeout; throw timedOut();
+    }), /STOP_SNAPSHOT_QUERY_FAILED/);
+    assert.equal(snapshots, 2); assert.equal(effects, 0);
+    assert.deepEqual([...retained.processes], [[root.ProcessId, root.CreationDate]]);
+  } finally { Date.now = originalNow; }
+});
+
+test('snapshot timeout cannot retry after the overall deadline is exhausted', async () => {
+  const originalNow = Date.now; let now = 1000, snapshots = 0;
+  const retained = ownership();
+  try {
+    Date.now = () => now;
+    await assert.rejects(stopProcessTree(root.ProcessId, retained, async phase => {
+      assert.equal(phase, 'snapshot'); snapshots++; now += 15000; throw timedOut();
+    }), /STOP_SNAPSHOT_QUERY_FAILED/);
+    assert.equal(snapshots, 1); assert.equal(retained.processes.size, 0);
+  } finally { Date.now = originalNow; }
+});
+
+test('invalid snapshots, command exits and output limits remain terminal without a snapshot retry', async () => {
+  for (const failure of [null, Object.assign(new Error('owned command exit'), { code: 23, killed: false }),
+    Object.assign(new Error('owned output limit'), { code: 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER', killed: true })]) {
+    let snapshots = 0;
+    await assert.rejects(stopProcessTree(root.ProcessId, ownership(), async phase => {
+      assert.equal(phase, 'snapshot'); snapshots++;
+      if (failure) throw failure;
+      return { stdout: JSON.stringify([root, { ...child, CreationDate: null }]) };
+    }), /STOP_METADATA_FAILED|STOP_SNAPSHOT_QUERY_FAILED/);
+    assert.equal(snapshots, 1);
+  }
+});
+
+test('the read retry allowance is shared across the whole Stop and never retries a stop command', async () => {
+  let snapshots = 0, effects = 0;
+  await assert.rejects(stopProcessTree(root.ProcessId, ownership(), async phase => {
+    if (phase === 'snapshot') {
+      snapshots++; if (snapshots === 1 || snapshots === 3) throw timedOut();
+      return { stdout: JSON.stringify([root]) };
+    }
+    effects++; return { stdout: '' };
+  }), /STOP_SNAPSHOT_QUERY_FAILED/);
+  assert.equal(snapshots, 3); assert.equal(effects, 1);
+  snapshots = 0; effects = 0;
+  await assert.rejects(stopProcessTree(root.ProcessId, ownership(), async phase => {
+    if (phase === 'snapshot') { snapshots++; return { stdout: JSON.stringify([root]) }; }
+    effects++; throw timedOut();
+  }), /STOP_TREE_FAILED/);
+  assert.equal(snapshots, 1); assert.equal(effects, 1);
+});
