@@ -4,7 +4,7 @@ import path from 'node:path';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
 import test from 'node:test';
-import { buildNative } from '../../bin/native-build.mjs';
+import { buildNative, MACOS_DEPLOYMENT_TARGET } from '../../bin/native-build.mjs';
 import { inspectMacPayload } from '../../bin/package-posix.mjs';
 import { inspectCodeSignature, verifyCodeSignature } from '../../bin/check-macos-release.mjs';
 import { digest } from '../../bin/check-macos-release.mjs';
@@ -16,7 +16,7 @@ function scratch() {
   const parent = path.join(root, '.runtime/tmp'); fs.mkdirSync(parent, { recursive: true });
   return fs.mkdtempSync(path.join(parent, 'macos-release-'));
 }
-function compile(folder, name, source = 'int main(void){return 0;}\n', target = '15.0') {
+function compile(folder, name, source = 'int main(void){return 0;}\n', target = MACOS_DEPLOYMENT_TARGET) {
   const file = path.join(folder, name); fs.writeFileSync(file + '.c', source);
   execFileSync('/usr/bin/cc', [`-mmacosx-version-min=${target}`, file + '.c', '-o', file], { stdio: 'pipe' }); return file;
 }
@@ -183,9 +183,9 @@ test('Mac notarization resume requires the original submission bytes and a conta
   } finally { fs.rmSync(folder, { recursive: true, force: true }); }
 });
 
-test('Mac native build records 15.0 and package inspection rejects newer or unexpected Mach-O files', { skip }, () => {
+test('Mac native build records the deployment target and package inspection rejects newer or unexpected Mach-O files', { skip }, () => {
   buildNative(root);
-  assert.match(execFileSync('/usr/bin/xcrun', ['vtool', '-show-build', path.join(root, 'dist/native/macos-processes')], { encoding: 'utf8' }), /minos 15\.0/);
+  assert.match(execFileSync('/usr/bin/xcrun', ['vtool', '-show-build', path.join(root, 'dist/native/macos-processes')], { encoding: 'utf8' }), new RegExp('minos ' + MACOS_DEPLOYMENT_TARGET.replace('.', '\\.')));
   const folder = scratch();
   try {
     const binary = compile(folder, 'fixture');

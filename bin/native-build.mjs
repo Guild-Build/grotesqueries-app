@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
 
-export const MACOS_DEPLOYMENT_TARGET = '15.0';
+export const MACOS_DEPLOYMENT_TARGET = '14.0';
 
 export function buildNative(root) {
   if (!['darwin', 'linux'].includes(process.platform)) return;
