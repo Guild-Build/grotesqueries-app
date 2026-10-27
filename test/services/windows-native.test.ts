@@ -12,12 +12,37 @@ const alive = (pid: number): boolean => {
   try { process.kill(pid, 0); return true; }
   catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false; throw error; }
 };
-type ErrorRecord = { message: string; stack?: string };
+type DiagnosticValue = string | number | boolean | null;
+type ErrorRecord = { message: string; stack?: string; code?: string | number | null; signal?: string | null; killed?: boolean;
+  stdoutBytes?: number; stderrBytes?: number; diagnostics?: Record<string, DiagnosticValue>; cause?: ErrorRecord };
 type CaseReport = { name: string; passed: boolean; cleanupVerified: boolean; knownPids: number[];
   primary?: ErrorRecord; cleanupErrors: ErrorRecord[] };
-const recordError = (error: unknown): ErrorRecord => error instanceof Error
-  ? { message: error.message, stack: error.stack } : { message: String(error) };
-const restoredError = (record: ErrorRecord): Error => Object.assign(new Error(record.message), { stack: record.stack });
+function recordError(error: unknown, depth = 0): ErrorRecord {
+  const record: ErrorRecord = error instanceof Error
+    ? { message: error.message.slice(0, 4096), stack: error.stack?.slice(0, 8192) } : { message: String(error).slice(0, 4096) };
+  if (!error || typeof error !== 'object') return record;
+  const fields = error as Record<string, unknown>;
+  if (fields.code === null || typeof fields.code === 'number' || typeof fields.code === 'string') record.code = typeof fields.code === 'string' ? fields.code.slice(0, 128) : fields.code;
+  if (fields.signal === null || typeof fields.signal === 'string') record.signal = fields.signal;
+  if (typeof fields.killed === 'boolean') record.killed = fields.killed;
+  for (const name of ['stdout', 'stderr'] as const) {
+    const value = fields[name], size = fields[name + 'Bytes'];
+    if (typeof value === 'string' || Buffer.isBuffer(value)) record[name + 'Bytes' as 'stdoutBytes' | 'stderrBytes'] = Buffer.byteLength(value);
+    else if (typeof size === 'number' && Number.isSafeInteger(size) && size >= 0) record[name + 'Bytes' as 'stdoutBytes' | 'stderrBytes'] = size;
+  }
+  if (fields.diagnostics && typeof fields.diagnostics === 'object') {
+    const diagnostics: Record<string, DiagnosticValue> = {};
+    for (const key of ['phase', 'kind', 'elapsedMs', 'timeoutMs', 'code', 'signal', 'killed', 'stdoutBytes', 'stderrBytes']) {
+      const value = (fields.diagnostics as Record<string, unknown>)[key];
+      if (value === null || typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value) || typeof value === 'string' && value.length <= 128) diagnostics[key] = value as DiagnosticValue;
+    }
+    record.diagnostics = diagnostics;
+  }
+  if (fields.cause !== undefined && depth < 3) record.cause = recordError(fields.cause, depth + 1);
+  return record;
+}
+const restoredError = ({ message, stack, cause, ...metadata }: ErrorRecord): Error => Object.assign(
+  new Error(message, cause ? { cause: restoredError(cause) } : undefined), { stack, ...metadata });
 async function until(predicate: () => boolean, description: string): Promise<void> {
   const deadline = Date.now() + 15000;
   while (!predicate()) { if (Date.now() >= deadline) throw new Error('WINDOWS_NATIVE_TIMEOUT: ' + description); await new Promise(resolve => setTimeout(resolve, 20)); }
@@ -129,7 +154,11 @@ if (worker) {
     const report: CaseReport = name === 'harness-pass'
       ? { name, passed: true, cleanupVerified: true, knownPids: [], cleanupErrors: [] }
       : name === 'harness-errors'
-        ? { name, passed: false, cleanupVerified: false, knownPids: [], primary: { message: 'OWNED_PRIMARY_FIXTURE_FAILURE' }, cleanupErrors: [{ message: 'OWNED_CLEANUP_FIXTURE_FAILURE' }] }
+        ? { name, passed: false, cleanupVerified: false, knownPids: [], primary: recordError(Object.assign(
+          new Error('OWNED_PRIMARY_FIXTURE_FAILURE', { cause: Object.assign(new Error('OWNED_COMMAND_FAILURE'),
+            { code: 23, signal: null, killed: false, stdout: 'owned-private-stdout', stderr: 'owned-private-stderr' }) }),
+          { code: 'STOP_SNAPSHOT_QUERY_FAILED', diagnostics: { phase: 'snapshot', kind: 'exit', elapsedMs: 12, timeoutMs: 5000,
+            code: 23, signal: null, killed: false, stdoutBytes: 20, stderrBytes: 20 } })), cleanupErrors: [{ message: 'OWNED_CLEANUP_FIXTURE_FAILURE' }] }
         : await exercise(name, directory);
     fs.writeFileSync(path.join(directory, 'case-report.json'), JSON.stringify(report, null, 2) + '\n');
     if (typeof process.send !== 'function') throw new Error('WINDOWS_NATIVE_WORKER_IPC');
@@ -143,6 +172,13 @@ if (worker) {
       await assert.rejects(isolated('harness-errors', failed), error => {
         assert.ok(error instanceof AggregateError);
         assert.deepEqual(error.errors.map(value => (value as Error).message), ['OWNED_PRIMARY_FIXTURE_FAILURE', 'OWNED_CLEANUP_FIXTURE_FAILURE']);
+        const primary = error.errors[0] as Error & ErrorRecord;
+        assert.equal(primary.code, 'STOP_SNAPSHOT_QUERY_FAILED'); assert.equal(primary.diagnostics?.phase, 'snapshot');
+        assert.equal(primary.diagnostics?.timeoutMs, 5000); assert.equal(primary.cause?.code, 23);
+        assert.equal(primary.cause?.signal, null); assert.equal(primary.cause?.killed, false);
+        assert.equal(primary.cause?.stdoutBytes, Buffer.byteLength('owned-private-stdout'));
+        assert.equal(primary.cause?.stderrBytes, Buffer.byteLength('owned-private-stderr'));
+        assert.equal(JSON.stringify(primary).includes('owned-private-'), false);
         return true;
       });
       assert.equal(JSON.parse(fs.readFileSync(path.join(failed, 'case-report.json'), 'utf8')).cleanupVerified, false);

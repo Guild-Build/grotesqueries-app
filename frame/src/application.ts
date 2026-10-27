@@ -15,7 +15,7 @@ import '../assets/stylesheets/guild-build.css';
 const app = document.querySelector<HTMLDivElement>('#app'); if (!app) throw new Error('Application root missing');
 app.innerHTML = `
 <div id="frame" class="shell">
-  <header id="title-bar" class="title-bar"><span id="title-name" class="title-name">Automata</span><span id="title-instance" class="title-field" title="Host instance"></span><span id="title-protocol" class="title-field"></span><span id="title-address" class="title-field"></span>
+  <header id="title-bar" class="title-bar"><span id="title-name" class="title-name">Grotesqueries</span><span id="title-instance" class="title-field" title="Host instance"></span><span id="title-protocol" class="title-field"></span><span id="title-address" class="title-field"></span>
     <div class="layout-actions"><button id="toggle-sessions" type="button" aria-controls="sessions-panel" aria-pressed="true">Sessions</button><button id="toggle-panel" type="button" aria-controls="panel-slot" aria-pressed="true">BuildGuild</button><button id="toggle-zen" type="button" aria-pressed="false">Zen</button><button id="open-settings" type="button" aria-controls="settings-view" aria-pressed="false">Settings</button></div></header>
   <aside id="sessions-panel" class="sidebar" aria-label="Sessions panel">
     <section id="panel-start" class="panel-section"><h1 class="panel-heading">Start</h1>
