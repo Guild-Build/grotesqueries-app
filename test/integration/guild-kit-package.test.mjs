@@ -5,7 +5,7 @@ import test from 'node:test';
 import { spawnSync } from 'node:child_process';
 import { gzipSync, gunzipSync } from 'node:zlib';
 import { ARCHIVE_LIMITS, readZip, writeZip, readTarGzip, writeTarGzip } from '../../bin/guild-kit-archive.mjs';
-import { digest, loadCatalog, packageGuildKit, inspectRuntimeArchive, inspectBundleArchive, validateCatalog } from '../../bin/package-guild-kit.mjs';
+import { digest, loadCatalog, packageGuildKit, inspectRuntimeArchive, inspectBundleArchive, validateCatalog, fetchBundle } from '../../bin/package-guild-kit.mjs';
 import { inspectGuildKit, fixtureCLI } from '../../bin/check-guild-kit.mjs';
 
 const bytes = value => Buffer.from(value);
@@ -40,6 +40,108 @@ function bundle(directory, slug = 'lean-start') {
   build.files = files.map(file => ({ path: file.name, sha256: digest(file.data), mode: file.mode }));
   return { archive, catalog, build, files };
 }
+
+function downloadResponse(build, data, overrides = {}) {
+  return { ok: true, status: 200, url: build.archive.url,
+    body: (async function* () { yield data; })(), ...overrides };
+}
+const networkFailure = code => new TypeError('private transport details must not be logged', {
+  cause: Object.assign(new Error('private endpoint information'), { code }),
+});
+
+test('pinned bundle download retries transient network and timeout failures with fresh bounded attempts', context => fixture(async directory => {
+  const selected = bundle(directory), data = fs.readFileSync(selected.archive), requests = [], waits = [], timeouts = [];
+  context.mock.method(AbortSignal, 'timeout', milliseconds => { timeouts.push(milliseconds); return new AbortController().signal; });
+  const result = await fetchBundle(selected.build, {
+    request: async (url, options) => {
+      requests.push({ url, options });
+      if (requests.length === 1) throw networkFailure('ECONNRESET');
+      if (requests.length === 2) throw new DOMException('private timeout diagnostics', 'TimeoutError');
+      return downloadResponse(selected.build, data);
+    }, pause: async milliseconds => { waits.push(milliseconds); },
+  });
+  assert.deepEqual(result, data); assert.equal(requests.length, 3); assert.deepEqual(waits, [500, 1000]);
+  assert.deepEqual(timeouts, [30000, 30000, 30000]);
+  assert.equal(new Set(requests.map(request => request.options.signal)).size, 3);
+  for (const { url, options } of requests) {
+    assert.equal(url, selected.build.archive.url); assert.equal(options.redirect, 'error');
+    assert.equal(options.headers['User-Agent'], 'Grotesqueries-release-verification/0.1');
+    assert.ok(options.signal instanceof AbortSignal);
+  }
+}));
+
+test('an interrupted body retries from empty buffers and transport exhaustion reports its stage without private details', () => fixture(async directory => {
+  const selected = bundle(directory), data = fs.readFileSync(selected.archive); let requests = 0; const waits = [];
+  const result = await fetchBundle(selected.build, {
+    request: async () => {
+      requests++;
+      if (requests === 1) return downloadResponse(selected.build, data, { body: (async function* () { yield data.subarray(0, 20); throw networkFailure('UND_ERR_SOCKET'); })() });
+      return downloadResponse(selected.build, data);
+    }, pause: async milliseconds => { waits.push(milliseconds); },
+  });
+  assert.deepEqual(result, data); assert.equal(requests, 2); assert.deepEqual(waits, [500]);
+  for (const stage of ['request', 'body']) {
+    requests = 0; waits.length = 0;
+    await assert.rejects(fetchBundle(selected.build, {
+      request: async () => {
+        requests++;
+        if (stage === 'request') throw networkFailure('ETIMEDOUT');
+        return downloadResponse(selected.build, data, { body: (async function* () { throw networkFailure('UND_ERR_SOCKET'); })() });
+      }, pause: async milliseconds => { waits.push(milliseconds); },
+    }), error => {
+      assert.match(error.message, new RegExp(`bundle download ${stage} failed.*attempts 3/3`));
+      assert.ok(!error.message.includes('private')); assert.equal(error.cause, undefined); return true;
+    });
+    assert.equal(requests, 3); assert.deepEqual(waits, [500, 1000]);
+  }
+}));
+
+test('a timed-out body retries using a new deadline even when the stream reports AbortError', context => fixture(async directory => {
+  const selected = bundle(directory), data = fs.readFileSync(selected.archive), controllers = [], waits = []; let requests = 0;
+  context.mock.method(AbortSignal, 'timeout', milliseconds => { assert.equal(milliseconds, 30000); const controller = new AbortController(); controllers.push(controller); return controller.signal; });
+  const result = await fetchBundle(selected.build, {
+    request: async () => {
+      requests++;
+      if (requests === 1) return downloadResponse(selected.build, data, { body: (async function* () {
+        yield data.subarray(0, 20); controllers[0].abort(new DOMException('private timeout reason', 'TimeoutError'));
+        throw new DOMException('private abort details', 'AbortError');
+      })() });
+      return downloadResponse(selected.build, data);
+    }, pause: async milliseconds => { waits.push(milliseconds); },
+  });
+  assert.deepEqual(result, data); assert.equal(requests, 2); assert.deepEqual(waits, [500]);
+  assert.equal(controllers[0].signal.aborted, true); assert.equal(controllers[1].signal.aborted, false);
+}));
+
+test('bundle download never retries HTTP rejection, redirects, invalid URLs, certificate failures or corrupt contents', () => fixture(async directory => {
+  const selected = bundle(directory), data = fs.readFileSync(selected.archive), corrupt = Buffer.from(data); corrupt[corrupt.length - 1] ^= 1;
+  const cases = [
+    ...[401, 403, 404, 429, 503].map(status => ({ label: 'HTTP ' + status, request: async () => downloadResponse(selected.build, data, { ok: false, status }), expected: /bundle download HTTP response/ })),
+    { label: 'HTTP refusal with socket failure during cancellation', request: async () => downloadResponse(selected.build, data, { ok: false, status: 403,
+      body: { cancel: async () => { throw networkFailure('UND_ERR_SOCKET'); } } }), expected: /bundle download HTTP response 403/ },
+    { label: 'redirect response', request: async () => downloadResponse(selected.build, data, { url: 'https://example.invalid/private-location' }), expected: /bundle download response URL differs/ },
+    { label: 'redirect rejection', request: async () => { throw new TypeError('fetch failed', { cause: new Error('unexpected redirect with private location') }); }, expected: /non-retryable transport.*attempts 1\/3/ },
+    { label: 'invalid URL', request: async () => { throw networkFailure('ERR_INVALID_URL'); }, expected: /non-retryable transport.*attempts 1\/3/ },
+    { label: 'certificate error', request: async () => { throw networkFailure('CERT_HAS_EXPIRED'); }, expected: /non-retryable transport.*attempts 1\/3/ },
+    { label: 'oversize', request: async () => downloadResponse(selected.build, Buffer.concat([data, bytes('x')])), expected: /bundle download size exceeds/ },
+    { label: 'short content', request: async () => downloadResponse(selected.build, data.subarray(0, -1)), expected: /bundle download size differs/ },
+    { label: 'checksum mismatch', request: async () => downloadResponse(selected.build, corrupt), expected: /bundle download checksum differs/ },
+  ];
+  for (const item of cases) {
+    let requests = 0, waits = 0;
+    await assert.rejects(fetchBundle(selected.build, { request: async (...args) => { requests++; return item.request(...args); },
+      pause: async () => { waits++; } }), item.expected, item.label);
+    assert.equal(requests, 1, item.label); assert.equal(waits, 0, item.label);
+  }
+}));
+
+test('assembly does not retry invalid archive contents that match their declared download checksum', context => fixture(async directory => {
+  const source = runtime(directory), selected = bundle(directory), data = Buffer.alloc(32, 65); let requests = 0;
+  selected.build.archive.bytes = data.length; selected.build.archive.sha256 = digest(data);
+  context.mock.method(globalThis, 'fetch', async () => { requests++; return downloadResponse(selected.build, data); });
+  await assert.rejects(packageGuildKit({ runtimeArchive: source.archive, buildSlug: 'lean-start', outputDirectory: path.join(directory, 'output') }, selected.catalog), /KIT_ARCHIVE_INVALID/);
+  assert.equal(requests, 1); assert.equal(fs.existsSync(path.join(directory, 'output')), false);
+}));
 
 test('generated POSIX CLI fixture records real lines and acknowledges input with spaced Unicode paths', { skip: process.platform === 'win32' }, () => fixture(directory => {
   assert.equal(process.version, 'v24.14.1');

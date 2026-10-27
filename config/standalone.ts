@@ -45,13 +45,13 @@ export async function runSea(probe?: (context: { runtime: Runtime; config: Confi
     diagnostics, hostInstanceId: crypto.randomUUID(),
     token: crypto.randomBytes(32).toString('base64url'),
     ...(config.fleet?.coordinator ? {} : { ready: { file: readyFilePath(runtime.root), refusals: [] } }) }) });
-  await host.listen();
-  console.log(JSON.stringify({ ready: true, url: host.origin, sessions: 0 }));
-  if (probe) { try { await probe({ runtime, config, payload, origin: host.origin }); } finally { await host.close(); } }
-  else {
+  if (!probe) {
     const stop = () => { void host.close().catch(() => { console.error('HOST_SHUTDOWN_FAILED'); process.exitCode = 1; }); };
     process.once('SIGINT', stop); process.once('SIGTERM', stop);
   }
+  await host.listen();
+  console.log(JSON.stringify({ ready: true, url: host.origin, sessions: 0 }));
+  if (probe) { try { await probe({ runtime, config, payload, origin: host.origin }); } finally { await host.close(); } }
 }
 
 // A separate probe entry invokes runSea with its own explicit fixture runner.

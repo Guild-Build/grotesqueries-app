@@ -32,12 +32,13 @@ async function main(): Promise<void> {
     settings: new HostSettings(runtime.configFile, runtime.root, config.port), guildBuild: guild.state,
     hostInstanceId: crypto.randomUUID(), token: crypto.randomBytes(32).toString('base64url'),
     ...(config.fleet?.coordinator ? {} : { ready: { file: readyFilePath(runtime.root), refusals: plugins.refused } }) }) });
-  await host.listen();
-  console.log(JSON.stringify({ ready: true, url: host.origin, sessions: 0,
-    plugins: plugins.summaries.map(plugin => plugin.name), refusedPlugins: plugins.refused }));
+  // The ready file can become visible during listen; graceful shutdown must already be installed.
   const stop = () => { void host.close().catch(() => { console.error('HOST_SHUTDOWN_FAILED'); process.exitCode = 1; }); };
   process.once('SIGINT', stop);
   process.once('SIGTERM', stop);
+  await host.listen();
+  console.log(JSON.stringify({ ready: true, url: host.origin, sessions: 0,
+    plugins: plugins.summaries.map(plugin => plugin.name), refusedPlugins: plugins.refused }));
 }
 void main().catch(async error => { process.exitCode = 1;
   await reportStartupFailure(error, path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..')); });

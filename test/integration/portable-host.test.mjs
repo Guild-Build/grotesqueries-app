@@ -118,10 +118,45 @@ test('preview creates its own configuration once and preserves operator and save
       assert.deepEqual(saved.launchProfiles, []);
       assert.equal(saved.terminal.scrollbackLines, run ? 1234 : config.terminal.scrollbackLines);
       assert.equal(fs.readFileSync(path.join(folder, 'config/grotesqueries.json'), 'utf8'), operator);
-      const exited = once(child, 'exit'); child.kill('SIGTERM'); assert.equal((await exited)[0], 0);
+      const exited = once(child, 'exit'); child.kill('SIGTERM');
+      const [code, signal] = await exited; assert.equal(code, 0, `Preview exited via ${signal}: ${errors}`);
       assert.equal(fs.existsSync(ready), false);
       if (!run) { saved.terminal.scrollbackLines = 1234; fs.writeFileSync(savedFile, JSON.stringify(saved)); }
     }
+  } finally {
+    if (child && child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited; }
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
+});
+
+for (const termination of ['SIGTERM', 'SIGINT']) test(`host handles ${termination} at the moment it publishes readiness`, { skip: process.platform === 'win32', timeout: 20000 }, async () => {
+  const tmp = path.join(root, '.runtime', 'tmp'); fs.mkdirSync(tmp, { recursive: true });
+  const folder = fs.mkdtempSync(path.join(tmp, 'portable-ready-signal-'));
+  let child;
+  try {
+    for (const directory of ['dist/host', 'public', 'frame/dist']) fs.cpSync(path.join(root, directory), path.join(folder, directory), { recursive: true });
+    fs.writeFileSync(path.join(folder, 'package.json'), '{"type":"module"}\n');
+    fs.mkdirSync(path.join(folder, 'config'));
+    const config = JSON.parse(fs.readFileSync(path.join(root, 'config/preview.json'), 'utf8'));
+    config.port = await port(); config.frame = '../frame/dist';
+    fs.writeFileSync(path.join(folder, 'config/grotesqueries.json'), JSON.stringify(config));
+    const preload = path.join(folder, 'signal-at-ready.mjs');
+    fs.writeFileSync(preload, `import fs from 'node:fs';
+import path from 'node:path';
+const rename = fs.renameSync.bind(fs);
+fs.renameSync = (from, to) => {
+  const result = rename(from, to);
+  if (path.basename(to) === 'host-ready.json') process.kill(process.pid, ${JSON.stringify(termination)});
+  return result;
+};\n`);
+    const env = { ...process.env }; delete env.GROTESQUERIES_CONFIG; delete env.GROTESQUERIES_LAUNCHER_PID;
+    child = spawn(process.execPath, ['--import', preload, path.join(folder, 'dist/host/server.js')], { cwd: root, env, stdio: ['ignore', 'pipe', 'pipe'] });
+    let errors = ''; child.stderr.on('data', chunk => { errors += chunk; }); child.stdout.resume();
+    const [code, signal] = await once(child, 'exit');
+    assert.equal(code, 0, `Ready host exited via ${signal}: ${errors}`);
+    assert.equal(fs.existsSync(path.join(folder, '.runtime/host-ready.json')), false);
+    const records = fs.readFileSync(path.join(folder, '.runtime/logs/host-0.log'), 'utf8').trim().split('\n').map(line => JSON.parse(line));
+    assert.ok(records.some(record => record.event === 'host-stop' && !record.code), 'Graceful host-stop was recorded');
   } finally {
     if (child && child.exitCode === null && child.signalCode === null) { const exited = once(child, 'exit'); child.kill('SIGTERM'); await exited; }
     fs.rmSync(folder, { recursive: true, force: true });

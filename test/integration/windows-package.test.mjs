@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import test from 'node:test';
 import { windowsZip, stripAuthenticodeSignature, defaultWindowsConfiguration } from '../../bin/package-windows.mjs';
-import { readWindowsZip, verifyWindowsFiles } from '../../bin/consumer-windows.mjs';
+import { cleanupWindowsConsumer, readWindowsZip, verifyWindowsFiles } from '../../bin/consumer-windows.mjs';
 import { seaConfig } from '../../bin/sea-config.mjs';
 import { frameAssets, FRAME_FILES } from '../../bin/frame-assets.mjs';
 
@@ -98,3 +98,40 @@ test('Windows packaging requires every frame asset and refuses linked inputs', (
   fs.unlinkSync(path.join(folder, 'assets/app.js')); assert.throws(() => frameAssets(folder));
   if (process.platform !== 'win32') { fs.symlinkSync('app.css', path.join(folder, 'assets/app.js')); assert.throws(() => frameAssets(folder), /WINDOWS_FRAME_SYMLINK/); }
 }));
+
+test('Windows consumer cleanup retains primary/recovery errors and never qualifies live fixture processes', async () => {
+  const temporary = path.join(process.cwd(), '.runtime/tmp'); fs.mkdirSync(temporary, { recursive: true });
+  const folder = fs.mkdtempSync(path.join(temporary, 'windows-cleanup-test-'));
+  try {
+    fs.writeFileSync(path.join(folder, 'fixture.txt'), 'owned cleanup fixture');
+    const primary = new Error('OWNED_PRIMARY_FAILURE'), recovery = new Error('OWNED_RECOVERY_FAILURE');
+    await assert.rejects(cleanupWindowsConsumer(folder, { pid: process.pid, stop: async () => { throw recovery; } }, [], primary), error => {
+      assert.ok(error instanceof AggregateError); assert.deepEqual(error.errors, [primary, recovery]); return true;
+    });
+    assert.equal(fs.readFileSync(path.join(folder, 'fixture.txt'), 'utf8'), 'owned cleanup fixture');
+    await assert.rejects(cleanupWindowsConsumer(folder, undefined, [process.pid]), /WINDOWS_CONSUMER_CLEANUP_FAILED/);
+    await assert.rejects(cleanupWindowsConsumer(folder, undefined, [], primary), error => error === primary);
+    await cleanupWindowsConsumer(folder, undefined, []); assert.equal(fs.existsSync(folder), false);
+  } finally { fs.rmSync(folder, { recursive: true, force: true }); }
+});
+
+test('Windows consumer cleanup treats a permission-denied PID probe as unknown and preserves evidence', async () => {
+  const temporary = path.join(process.cwd(), '.runtime/tmp'); fs.mkdirSync(temporary, { recursive: true });
+  const folder = fs.mkdtempSync(path.join(temporary, 'windows-probe-test-'));
+  const originalKill = process.kill;
+  const denied = Object.assign(new Error('OWNED_PID_PROBE_DENIED'), { code: 'EPERM' });
+  try {
+    fs.writeFileSync(path.join(folder, 'fixture.txt'), 'owned probe fixture');
+    process.kill = function (pid, signal) {
+      if (pid === process.pid && signal === 0) throw denied;
+      return originalKill.call(process, pid, signal);
+    };
+    await assert.rejects(cleanupWindowsConsumer(folder, undefined, [process.pid]), error => {
+      assert.ok(error instanceof AggregateError); assert.deepEqual(error.errors, [denied]); return true;
+    });
+    assert.equal(fs.readFileSync(path.join(folder, 'fixture.txt'), 'utf8'), 'owned probe fixture');
+  } finally {
+    process.kill = originalKill;
+    fs.rmSync(folder, { recursive: true, force: true });
+  }
+});

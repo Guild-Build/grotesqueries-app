@@ -176,7 +176,8 @@ export function startOwnedWindowsHost(executable, cwd, env) {
   if (!Number.isSafeInteger(pid) || pid > 0xffffffff) throw new Error('WINDOWS_HOST_FIXTURE_IDENTITY');
   let stopping;
   return { pid, birth, stop() {
-    return stopping ??= (async () => {
+    if (stopping) return stopping;
+    const attempt = (async () => {
       if (!alive(pid)) return;
       sendCtrlC(powershell, executable, pid, birth, options);
       const deadline = Date.now() + 30000;
@@ -185,7 +186,29 @@ export function startOwnedWindowsHost(executable, cwd, env) {
         await pause(25);
       }
     })();
+    stopping = attempt;
+    void attempt.catch(() => { if (stopping === attempt) stopping = undefined; });
+    return attempt;
   } };
+}
+
+/** Finalize only the owned fixture, retaining every primary and recovery failure. */
+export async function cleanupWindowsConsumer(scratch, ownedHost, fixturePids, primaryFailure) {
+  const cleanupErrors = [];
+  try { if (ownedHost && alive(ownedHost.pid)) await ownedHost.stop(); }
+  catch (error) { cleanupErrors.push(error); }
+  try { if (fixturePids.some(alive)) cleanupErrors.push(new Error('WINDOWS_CONSUMER_PROCESSES_REMAIN: Recorded fixture processes are still live.')); }
+  catch (error) { cleanupErrors.push(error); }
+  if (primaryFailure !== undefined || cleanupErrors.length) {
+    console.error('Windows consumer failure needs recovery; owned fixture preserved at ' + scratch);
+    if (cleanupErrors.length) {
+      throw new AggregateError([...(primaryFailure === undefined ? [] : [primaryFailure]), ...cleanupErrors],
+        'WINDOWS_CONSUMER_CLEANUP_FAILED: Evidence preserved at ' + scratch, { cause: primaryFailure ?? cleanupErrors[0] });
+    }
+    throw primaryFailure;
+  }
+  try { fs.rmSync(scratch, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); }
+  catch (error) { throw new Error('WINDOWS_CONSUMER_REMOVE_FAILED: Passed process checks; fixture preserved at ' + scratch, { cause: error }); }
 }
 
 /** Downloaded archive plus this bundled checker are the only inputs; test installations are always newly extracted. */
@@ -203,7 +226,7 @@ export async function checkWindowsArchive(archive) {
   const scratch = fs.mkdtempSync(path.join(temporary, 'windows-consumer-'));
   const folder = path.join(scratch, top), caller = path.join(scratch, 'different-cwd'), temp = path.join(scratch, 'temp');
   fs.mkdirSync(folder); fs.mkdirSync(caller); fs.mkdirSync(temp);
-  let pid, ownedHost, peer, preserve = false; const fixturePids = [];
+  let pid, ownedHost, peer, primaryFailure; const fixturePids = [];
   const windows = process.env.SystemRoot ?? process.env.SYSTEMROOT;
   assert.match(windows ?? '', /^[A-Za-z]:[\\/]/);
   const powershell = path.join(windows, 'System32/WindowsPowerShell/v1.0/powershell.exe');
@@ -354,16 +377,11 @@ export async function checkWindowsArchive(archive) {
         'observer-input-refusal', 'unicode-roundtrip', 'native-resize', 'disconnect-survival', 'observing-reconnect', 'retained-screen',
         'natural-root-exit-retains-cleanup', 'root-exit-during-stop', 'detached-descendant-cleanup', 'sibling-survival', 'native-stop', 'real-console-ctrl-c', 'graceful-host-cleanup'] };
     return result;
+  } catch (error) {
+    primaryFailure = error; throw error;
   } finally {
     peer?.socket.terminate();
-    if (pid && alive(pid)) {
-      try {
-        await ownedHost.stop();
-      } catch { preserve = true; }
-    }
-    if (fixturePids.some(alive)) preserve = true;
-    if (preserve) console.error('Windows consumer cleanup needs recovery; owned fixture preserved at ' + scratch);
-    else fs.rmSync(scratch, { recursive: true, force: true });
+    await cleanupWindowsConsumer(scratch, ownedHost, fixturePids, primaryFailure);
   }
 }
 

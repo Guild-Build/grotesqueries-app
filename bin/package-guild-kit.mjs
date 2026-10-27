@@ -111,15 +111,46 @@ export function inspectBundleArchive(bytes, build) {
   if (build.requiresBash !== files.some(file => file.name === 'hooks/hooks.json')) fail('bundle hook declaration');
   return files;
 }
-async function fetchBundle(build) {
-  const response = await fetch(build.archive.url, { redirect: 'error', headers: { 'User-Agent': 'Grotesqueries-release-verification/0.1' }, signal: AbortSignal.timeout(30000) });
-  if (!response.ok || response.url !== build.archive.url) fail('bundle download response');
-  const chunks = []; let size = 0;
-  for await (const chunk of response.body) {
-    if ((size += chunk.length) > build.archive.bytes) fail('bundle download size');
-    chunks.push(chunk);
+const transientDownloadCodes = new Set(['ECONNRESET', 'ECONNREFUSED', 'ECONNABORTED', 'ETIMEDOUT', 'EAI_AGAIN', 'ENOTFOUND',
+  'ENETUNREACH', 'EHOSTUNREACH', 'ENETDOWN', 'EPIPE', 'UND_ERR_CONNECT_TIMEOUT', 'UND_ERR_HEADERS_TIMEOUT', 'UND_ERR_BODY_TIMEOUT', 'UND_ERR_SOCKET']);
+class BundleDownloadRejection extends Error {}
+const rejectDownload = message => { throw new BundleDownloadRejection('GUILD_KIT_INVALID: bundle download ' + message); };
+function transientDownloadFailure(error, signal) {
+  if (signal.aborted && signal.reason?.name === 'TimeoutError') return 'TIMEOUT';
+  for (const candidate of [error, error?.cause, error?.cause?.cause]) {
+    if (candidate?.name === 'TimeoutError') return 'TIMEOUT';
+    if (transientDownloadCodes.has(candidate?.code)) return candidate.code;
   }
-  return Buffer.concat(chunks);
+}
+/** Retry transport failures only; pinned response identity and contents never receive a retry. */
+export async function fetchBundle(build, { request = globalThis.fetch,
+  pause = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds)) } = {}) {
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    const signal = AbortSignal.timeout(30000); let stage = 'request';
+    try {
+      const response = await request(build.archive.url, { redirect: 'error', headers: { 'User-Agent': 'Grotesqueries-release-verification/0.1' }, signal });
+      if (!response.ok || response.url !== build.archive.url) {
+        try { await response.body?.cancel?.(); } catch { /* The response rejection remains authoritative. */ }
+        if (response.url !== build.archive.url) rejectDownload('response URL differs from the pinned URL');
+        rejectDownload('HTTP response ' + (Number.isInteger(response.status) && response.status >= 0 && response.status <= 599 ? response.status : 'invalid'));
+      }
+      stage = 'body';
+      const chunks = []; let size = 0;
+      for await (const chunk of response.body) {
+        if ((size += chunk.length) > build.archive.bytes) rejectDownload('size exceeds pinned byte count');
+        chunks.push(chunk);
+      }
+      if (size !== build.archive.bytes) rejectDownload('size differs from pinned byte count');
+      const bytes = Buffer.concat(chunks);
+      if (digest(bytes) !== build.archive.sha256) rejectDownload('checksum differs from the pinned SHA-256');
+      return bytes;
+    } catch (error) {
+      if (error instanceof BundleDownloadRejection) throw error;
+      const transient = transientDownloadFailure(error, signal);
+      if (!transient || attempt === 3) rejectDownload(`${stage} failed (${transient ?? 'non-retryable transport'}; attempts ${attempt}/3)`);
+      await pause(attempt * 500);
+    }
+  }
 }
 function safeOutputDirectory(directory) {
   const parsed = path.parse(directory); let current = parsed.root;
