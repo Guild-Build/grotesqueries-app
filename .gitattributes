@@ -1,0 +1,2 @@
+# Keep pinned source and license bytes stable on Windows checkouts.
+* text=auto eol=lf
