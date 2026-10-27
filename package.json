@@ -1,6 +1,6 @@
 {
   "name": "grotesqueries",
-  "version": "0.1.0-alpha.1",
+  "version": "0.1.0-alpha.2",
   "private": true,
   "type": "module",
   "description": "Local browser terminal and session host",
@@ -23,7 +23,9 @@
     "check:package:posix": "node bin/check-posix-package.mjs",
     "package:macos": "npm run build && node bin/package-macos.mjs",
     "check:macos-release": "node bin/check-macos-release.mjs",
-    "check:clean-linux": "node bin/check-clean-linux.mjs"
+    "check:clean-linux": "node bin/check-clean-linux.mjs",
+    "package:windows": "npm run build && node bin/package-windows.mjs",
+    "check:package:windows": "node bin/check-windows-package.mjs"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

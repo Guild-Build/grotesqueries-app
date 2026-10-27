@@ -14,6 +14,7 @@ import { readyFilePath } from '../app/helpers/ready.js';
 import { configureInstallation } from '../app/services/setup.js';
 import { HostSettings } from '../app/services/settings.js';
 import { composeHost } from './composition.js';
+import { loadGuildBuild } from '../app/services/guild-build.js';
 
 export async function runSea(probe?: (context: { runtime: Runtime; config: Config; payload: string;
   origin: string }) => Promise<void>): Promise<void> {
@@ -30,7 +31,8 @@ export async function runSea(probe?: (context: { runtime: Runtime; config: Confi
   const temporary = managedDirectory(runtime.root, runtime.temporary);
   process.env.TEMP = process.env.TMP = temporary;
   process.env.TMPDIR = posixWindowsPath(temporary);
-  const config = loadConfig(runtime.configFile, runtime.root);
+  const guild = loadGuildBuild(runtime.root, loadConfig(runtime.configFile, runtime.root));
+  const config = guild.config;
   const payload = extractNativePayload(root, manifest, name => new Uint8Array(getAsset(`native/${name}`)));
   // Requirement 4.2.2: the frame's files when the EXE was packaged with them; a `frame` beside the EXE wins over them.
   const frameFiles = Object.values(frameRoutes).map(({ file }) => file).filter(file => getAssetKeys().includes(`web/${file}`));
@@ -39,7 +41,7 @@ export async function runSea(probe?: (context: { runtime: Runtime; config: Confi
   const diagnostics = new DiagnosticLogger(root, config.diagnostics);
   const host = composeHost({ config, runtime, assets, engine: () => createHost({ config, runtime, assets,
     sessions: new SessionRegistry({ config, launcher: new NodePtyLauncher(root, payload), diagnostics }),
-    settings: new HostSettings(runtime.configFile, runtime.root, config.port),
+    settings: new HostSettings(runtime.configFile, runtime.root, config.port), guildBuild: guild.state,
     diagnostics, hostInstanceId: crypto.randomUUID(),
     token: crypto.randomBytes(32).toString('base64url'),
     ...(config.fleet?.coordinator ? {} : { ready: { file: readyFilePath(runtime.root), refusals: [] } }) }) });

@@ -1,0 +1,100 @@
+name: Windows native package
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Windows x64 source and package
+    runs-on: windows-2022
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.14.1
+          architecture: x64
+      - run: npm ci --ignore-scripts
+      - run: npm run typecheck
+      - run: npm run typecheck:test
+      - run: npm run build
+      - run: npm test -- windows-package windows-native guild-build guild-kit-package native-payload portable-files models/sessions controllers/control-input integration/bridge
+      - run: node bin/package-windows.mjs
+      - run: node bin/check-windows-package.mjs
+      - name: Install pinned native CLI for plugin checks without model calls
+        run: npm install --prefix .runtime/provider-cli --no-package-lock --ignore-scripts @anthropic-ai/claude-code@2.1.310
+      - name: Assemble and qualify complete Guild builds
+        shell: pwsh
+        run: |
+          $archives = @(Get-ChildItem -File dist/windows/*.zip)
+          if ($archives.Count -ne 1) { throw 'Expected one base Windows archive' }
+          node bin/qualify-guild-kits.mjs $archives[0].FullName .runtime/provider-cli
+          if ($LASTEXITCODE -ne 0) { throw 'Guild kit qualification failed' }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: guild-kit-proof-Windows-X64
+          path: |
+            dist/guild-kits/*.assembly.json
+            dist/guild-kits/*.qualification.json
+            dist/guild-kits/*.sha256
+          if-no-files-found: error
+          retention-days: 1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: unsigned-windows-x64-candidate
+          path: |
+            dist/windows/*.zip
+            dist/windows/*.sha256
+            dist/windows/consumer-windows.mjs
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evidence-windows-package
+          path: .runtime/verification/windows-package.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 1
+
+  consumer:
+    name: Fresh Windows x64 artifact consumer
+    needs: build
+    runs-on: windows-2022
+    timeout-minutes: 15
+    steps:
+      # No source checkout or npm install on this VM. Node runs the separate test tool only.
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned-windows-x64-candidate
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 24.14.1
+          architecture: x64
+      - name: Verify only the downloaded archive in a fresh installation
+        env:
+          EXPECTED_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        shell: pwsh
+        run: |
+          $archives = @(Get-ChildItem -File *.zip)
+          if ($archives.Count -ne 1) { throw 'Expected exactly one Windows archive' }
+          node consumer-windows.mjs $archives[0].FullName
+          if ($LASTEXITCODE -ne 0) { throw 'Artifact consumer failed' }
+          $report = Get-Content -Raw .runtime/verification/windows-consumer.json | ConvertFrom-Json
+          if ($report.sourceRevision -ne $env:EXPECTED_SOURCE_REVISION -or $report.sourceDirty) { throw 'Artifact source identity mismatch' }
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: evidence-windows-fresh-consumer
+          path: .runtime/verification/windows-consumer.json
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 1

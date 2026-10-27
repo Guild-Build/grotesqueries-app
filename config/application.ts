@@ -131,7 +131,7 @@ export function loadConfig(file: string, root: string): Config {
   if (process.platform !== 'win32' && (/^[A-Z]:/i.test(file) || file.includes('\\') || file.startsWith('//'))) throw new Error('Configuration must use a local POSIX path.');
   const configPath = assertManagedPath(root, path.resolve(file));
   let raw: unknown;
-  try { raw = JSON.parse(fs.readFileSync(configPath, 'utf8')); }
+  try { raw = JSON.parse(fs.readFileSync(configPath, 'utf8').replace(/^\uFEFF/, '')); }
   catch { throw new Error('Cannot read valid JSON configuration. Check grotesqueries.json in the application project.'); }
   return parseConfig(raw, configPath, root);
 }

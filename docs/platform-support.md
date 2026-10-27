@@ -15,8 +15,14 @@ Its cleanup guarantee covers tracked processes only. A rapid double-fork/setsid
 daemon can leave the tracked tree before observation. Do not interpret a successful
 Stop as complete arbitrary-daemon cleanup. The application keeps this scope visible.
 
-Both platforms retain failed or unknown cleanup and allow a cleanup-only retry.
-Neither platform recovers live PTYs after host loss. Native tests use harmless
+Windows x64 uses ConPTY and generation-bound owned-tree signaling. Primary exit
+retains cleanup ownership until Stop verifies the known lineage. Its scope is
+tracked descendants: a detached descendant behind an unobserved exited parent
+can escape that lineage. The executable is unsigned; release checks do not
+establish publisher trust or acceptance by every device's download policy.
+
+All platforms retain failed or unknown cleanup and allow a cleanup-only retry.
+No platform recovers live PTYs after host loss. Native tests use harmless
 owned fixtures and verify that unrelated sibling processes survive Stop.
 
 The Mac build target is macOS 15. A release becomes supported on a platform only
@@ -24,6 +30,8 @@ after its final downloadable bytes pass that platform's qualification. Signing,
 notarization and clean consumer tests are separate gates. Read the download page
 and release evidence for actual qualified targets; build success is insufficient.
 
-Windows source and its prior standalone packaging remain separate from these
-Mac/Linux public artifacts. Fleet, provider integrations, load limits and
+Windows ZIPs and Linux archives use their own native artifact-consumer gates.
+Read their release reports for the actual operating systems and runner limits.
+Preset kits additionally verify the selected Guild build, passive setup,
+fixed launch profile, plugin loading and hook dependencies. Fleet, provider integrations, load limits and
 enterprise deployment have not been qualified by these native package checks.

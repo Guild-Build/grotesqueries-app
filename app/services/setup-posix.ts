@@ -2,10 +2,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { assertManagedPath, managedDirectory } from '../helpers/runtime.js';
 import { loadConfig, parseConfig, resolveExecutable } from '../../config/application.js';
+import { verifyGuildBuild } from './guild-build.js';
 
 /** Discover tools without executing them; existing configuration always wins. */
 export function setupPosix(root: string, packaged = false, inherited: NodeJS.ProcessEnv = process.env): string {
   if (!['darwin', 'linux'].includes(process.platform)) throw new Error('POSIX_SETUP_UNSUPPORTED: Use Windows setup on this platform.');
+  verifyGuildBuild(root);
   const directory = managedDirectory(root, path.join(root, packaged ? 'config' : '.runtime/posix'));
   const file = assertManagedPath(root, path.join(directory, 'grotesqueries.json'));
   if (fs.existsSync(file)) { loadConfig(file, root); return file; }

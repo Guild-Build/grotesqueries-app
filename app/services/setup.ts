@@ -3,6 +3,8 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type { LaunchProfile } from '@grotesqueries/protocol';
 import { assertManagedPath, isWithin } from '../helpers/runtime.js';
+import { parseConfig } from '../../config/application.js';
+import { verifyGuildBuild } from './guild-build.js';
 
 type Program = { path: string; executable: string };
 
@@ -10,6 +12,7 @@ type Program = { path: string; executable: string };
 export function configureInstallation(directory: string,
   inherited: Record<string, string | undefined> = process.env): void {
   const root = assertManagedPath(directory, directory);
+  verifyGuildBuild(root);
   if (!fs.existsSync(path.win32.join(root, 'grotesqueries.exe'))) throw new Error('grotesqueries.exe was not found in the application folder.');
   const variables: Record<string, string> = Object.fromEntries(
     Object.entries(inherited).map(([key, value]) => [key.toUpperCase(), value ?? '']));
@@ -79,9 +82,8 @@ export function configureInstallation(directory: string,
   addCLI('claude', 'Claude Code', [under('USERPROFILE', '.local/bin/claude.exe'),
     under('LOCALAPPDATA', 'Microsoft/WinGet/Links/claude.exe')]);
   addCLI('codex', 'Codex', [under('LOCALAPPDATA', 'Programs/OpenAI/Codex/bin/codex.exe')]);
-  if (!profiles.length) throw new Error('No supported executable was found. Install a shell or CLI, then run setup again.');
-
   const file = assertManagedPath(root, path.win32.join(root, 'grotesqueries.json'));
+  if (!profiles.length && !fs.existsSync(file)) throw new Error('No supported executable was found. Install a shell or CLI, then run setup again.');
   let configuration: Record<string, unknown>;
   if (fs.existsSync(file)) {
     let raw: unknown;
@@ -91,13 +93,21 @@ export function configureInstallation(directory: string,
       throw new Error('Existing JSON has an unsupported version. Preserve it and restore version-1 JSON first.');
     }
     configuration = raw as Record<string, unknown>;
+    const parsed = parseConfig(configuration, file, root);
+    const existing = configuration.launchProfiles as LaunchProfile[];
+    const additions = parsed.allowedProjectDirectories.some(allowed => isWithin(allowed, root))
+      ? profiles.filter(profile => !existing.some(item => item.id === profile.id)).slice(0, 64 - existing.length) : [];
+    if (!additions.length) {
+      console.log('Existing configuration preserved. No CLI was launched.');
+      return;
+    }
+    configuration = { ...configuration, launchProfiles: [...existing, ...additions] };
   } else {
-    configuration = { version: 1, port: 8765,
+    configuration = { version: 1, port: 8765, allowedProjectDirectories: ['.'], launchProfiles: profiles,
       terminal: { scrollbackLines: 10000, recentOutputBytes: 8388608, maxIncompleteSequenceBytes: 65536 },
       diagnostics: { directory: '.runtime/logs', maxFiles: 4, maxFileBytes: 1048576 } };
   }
-  configuration.allowedProjectDirectories = ['.'];
-  configuration.launchProfiles = profiles;
+  parseConfig(configuration, file, root);
   if (fs.existsSync(file)) {
     const first = assertManagedPath(root, file + '.bak');
     const backup = fs.existsSync(first) ? assertManagedPath(root, file + '.' + crypto.randomUUID() + '.bak') : first;
@@ -106,11 +116,11 @@ export function configureInstallation(directory: string,
   }
   const temporary = assertManagedPath(root, path.win32.join(root, '.grotesqueries-' + crypto.randomUUID() + '.tmp'));
   try {
-    fs.writeFileSync(temporary, JSON.stringify(configuration, null, 2) + '\n', { encoding: 'utf8', flag: 'wx' });
+    fs.writeFileSync(temporary, JSON.stringify(configuration, null, 2) + '\n', { encoding: 'utf8', flag: 'wx', mode: 0o600 });
     fs.renameSync(temporary, file);
   } finally {
     if (fs.existsSync(temporary)) fs.unlinkSync(temporary);
   }
-  console.log('Wrote ' + file + ' with ' + profiles.length + ' profiles. Project directories are relative to the EXE.');
+  console.log('Wrote ' + file + ' with ' + (configuration.launchProfiles as unknown[]).length + ' profiles. Existing profiles and allowed directories were preserved.');
   console.log('No CLI was launched. Restart the host to apply this configuration.');
 }

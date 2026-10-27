@@ -13,6 +13,7 @@ function exact(value: Record<string, unknown>, fields: string[]): void {
     throw new Error('SETTINGS_INVALID: Missing or unsupported fields.');
 }
 const revision = (text: string) => crypto.createHash('sha256').update(text).digest('hex');
+type SavedSettings = { document: SettingsDocument; config: Config };
 
 /** Operator-owned file only. Save is synchronous and atomic; no active changes precede durable replacement. */
 export class HostSettings {
@@ -20,7 +21,7 @@ export class HostSettings {
   private read(): { raw: Record<string, unknown>; config: Config; revision: string } {
     if (fs.statSync(this.file).size > 1024 * 1024) throw new Error('SETTINGS_INVALID: Configuration exceeds 1 MiB.');
     const text = fs.readFileSync(this.file, 'utf8');
-    const raw = object(JSON.parse(text));
+    const raw = object(JSON.parse(text.replace(/^\uFEFF/, '')));
     return { raw, config: parseConfig(raw, this.file, this.root), revision: revision(text) };
   }
   private project(config: Config, rev: string): SettingsDocument {
@@ -32,7 +33,9 @@ export class HostSettings {
           ({ id, label, executable, args: [...args], projectDirectory, columns: columns ?? null })) } };
   }
   get(): SettingsDocument { const value = this.read(); return this.project(value.config, value.revision); }
-  save(value: unknown): { document: SettingsDocument; config: Config } {
+  save(value: unknown): SavedSettings;
+  save<T>(value: unknown, prepare: (candidate: Config) => T): SavedSettings & { prepared: T };
+  save<T>(value: unknown, prepare?: (candidate: Config) => T): SavedSettings & { prepared?: T } {
     const request = object(value); exact(request, ['revision', 'settings']);
     const current = this.read();
     if (request.revision !== current.revision) throw new Error('SETTINGS_CONFLICT: Configuration changed. Reload settings before saving.');
@@ -57,6 +60,10 @@ export class HostSettings {
     const config = parseConfig(raw, this.file, this.root);
     const text = JSON.stringify(raw, null, 2) + '\n';
     if (Buffer.byteLength(text) > 1024 * 1024) throw new Error('SETTINGS_INVALID: Configuration exceeds 1 MiB.');
+    const document = this.project(config, revision(text));
+    // Complete fallible runtime preparation before replacing the operator file.
+    // The final revision check still protects edits made while preparation runs.
+    const prepared = prepare?.(config);
     const temporary = path.join(path.dirname(this.file), `.settings-${crypto.randomUUID()}.tmp`);
     let created = false;
     try {
@@ -66,6 +73,6 @@ export class HostSettings {
         throw new Error('SETTINGS_CONFLICT: Configuration changed during save. Reload settings.');
       fs.renameSync(temporary, this.file); created = false;
     } finally { if (created) fs.unlinkSync(temporary); }
-    return { document: this.project(config, revision(text)), config };
+    return { document, config, ...(prepare ? { prepared } : {}) };
   }
 }

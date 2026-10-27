@@ -92,6 +92,13 @@ export interface Bootstrap {
   limits: EffectiveLimits;
 }
 
+export const GUILD_BUILD_SLUGS = ['lean-start', 'measured-delivery', 'measured-writing-desk', 'evidence-first-review', 'trial-runner'] as const;
+/** Read-only kit information. It carries no commands, credentials or machine paths. */
+export interface GuildBuildSummary {
+  slug: string; name: string; version: string; target: 'claude-code'; modules: string[];
+  catalogRevision: string; profileId: string | null; prerequisites: string[];
+}
+
 export type GapReason = 'history-evicted' | 'sequence-gap' | 'slow-view' | 'renderer-overflow';
 export type CancelReason = 'replaced' | 'detached' | 'timeout' | 'overflow' | 'catch-up-gap' | 'restore-failed';
 export type Operation = 'ready' | 'attach' | 'detach' | 'take-control' | 'release-control' | 'resize' | 'stop' | 'resync';
@@ -130,7 +137,7 @@ export type ServerMessage =
   | ProtocolError
   | { type: 'pong'; requestId: number };
 
-export { decodeClientMessage, decodeServerMessage, decodeBootstrap, decodePluginManifest, utf8Bytes, utf8Chunks } from './validation.ts';
+export { decodeClientMessage, decodeServerMessage, decodeBootstrap, decodeGuildBuild, decodePluginManifest, utf8Bytes, utf8Chunks } from './validation.ts';
 export { importChecked, importViolations } from './plugin-imports.ts';
 export { TERMINAL_QUERY_CATALOG } from './terminal-queries.ts';
 export type { EditableSettings, SettingsDocument } from './settings.js';

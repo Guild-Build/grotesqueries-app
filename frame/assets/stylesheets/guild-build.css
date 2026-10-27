@@ -1,0 +1,5 @@
+.guild-build-panel{height:100%;overflow:auto;box-sizing:border-box;padding:18px;font-size:13px;line-height:1.55;overflow-wrap:anywhere}
+.guild-build-panel h2{font-size:17px;margin:0 0 18px}.guild-build-panel h3{font-size:14px;margin:22px 0 8px}
+.guild-build-panel p{margin:10px 0}.guild-build-panel ul{padding-left:18px}.guild-build-panel li{margin:8px 0}
+.guild-build-panel a{color:inherit;display:block;margin:10px 0;text-underline-offset:3px}.guild-build-panel li a{display:inline;margin:0}
+.guild-build-panel .guild-build-prerequisites{border:1px solid currentColor;padding:10px 10px 10px 28px}

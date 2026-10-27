@@ -1,0 +1,292 @@
+{
+  "schemaVersion": 1,
+  "catalogRevision": "727f804db5dbd46d07186132a512a425cbda94ea",
+  "builds": [
+    {
+      "slug": "lean-start",
+      "name": "Lean Start",
+      "version": "1.0.0",
+      "target": "claude-code",
+      "modules": [
+        "playbook/lean-start-playbook",
+        "skill/context-budget"
+      ],
+      "requiresBash": false,
+      "archive": {
+        "url": "https://buildguild.gg/dl/lean-start-1.0.0.zip",
+        "sha256": "6da15a9b9befa82ad07957d9029448ba4cce584c4103a0d7cdbdb595b3ad5897",
+        "bytes": 3529
+      },
+      "files": [
+        {
+          "path": ".claude-plugin/plugin.json",
+          "sha256": "2ae2f4d1bc7e566bec9e22535d259fe089585585e1e27054044cafc5c4e5c15d",
+          "mode": 420
+        },
+        {
+          "path": "LICENSE",
+          "sha256": "3efda37b6af8938515fce3a496354a63a45f511c0fa05ae09ca3a94477529c24",
+          "mode": 420
+        },
+        {
+          "path": "README.md",
+          "sha256": "b879027310a0c9902c236f6c834ef5b8747be585d8d87d4a1cf8a3d61e2a10ca",
+          "mode": 420
+        },
+        {
+          "path": "buildguild.json",
+          "sha256": "617b36c369b6ed272e920379400efbe0f2bff367e7a8ae6f697f7b4aa671fe17",
+          "mode": 420
+        },
+        {
+          "path": "playbooks/lean-start.md",
+          "sha256": "160f616afe743f39d2f705acd7bef2e3d8f7945d94769ba8197f3554fc8963d2",
+          "mode": 420
+        },
+        {
+          "path": "skills/context-budget/SKILL.md",
+          "sha256": "af228b238a3cc591973cddc8c0ca9c52de725f90ce4e6d8cfde961af5decfcae",
+          "mode": 420
+        }
+      ]
+    },
+    {
+      "slug": "measured-delivery",
+      "name": "Measured Delivery",
+      "version": "1.0.0",
+      "target": "claude-code",
+      "modules": [
+        "skill/commit-discipline",
+        "skill/test-first",
+        "skill/handoff-note",
+        "agent/scout",
+        "hook/uncommitted-work-check"
+      ],
+      "requiresBash": true,
+      "archive": {
+        "url": "https://buildguild.gg/dl/measured-delivery-1.0.0.zip",
+        "sha256": "b16f3550858af8d8dc6e1f64de2e38405e3070e931a0537b2993660c1101918f",
+        "bytes": 5585
+      },
+      "files": [
+        {
+          "path": ".claude-plugin/plugin.json",
+          "sha256": "d0018d318b8ace393f9fa4aaf09470d1794f4a36e88cd7b628f7eeaa3f0dc0d0",
+          "mode": 420
+        },
+        {
+          "path": "LICENSE",
+          "sha256": "3efda37b6af8938515fce3a496354a63a45f511c0fa05ae09ca3a94477529c24",
+          "mode": 420
+        },
+        {
+          "path": "README.md",
+          "sha256": "961e55b84e7b192baa02e8f57ccfd6e5f0322c977d02f4c405164309cf69d504",
+          "mode": 420
+        },
+        {
+          "path": "agents/scout.md",
+          "sha256": "c7dd12f351e49e9cf3fdc5aac28939c71d571b3f43d1725d18474f84decb705f",
+          "mode": 420
+        },
+        {
+          "path": "buildguild.json",
+          "sha256": "4c0f7722f608a6805d71366a48b916f4b8206686eb3c0e34ad305fff7d2fc243",
+          "mode": 420
+        },
+        {
+          "path": "hooks/hooks.json",
+          "sha256": "fc95c1a7b4923ab64ba468b2b5272d9a865940ab67c0c85b4e929ea73f96279f",
+          "mode": 420
+        },
+        {
+          "path": "scripts/uncommitted-work-check.sh",
+          "sha256": "34d0949e001aa3c98a0ddd51fdbbb1343c1e25345517f0cf853f49b1842175eb",
+          "mode": 493
+        },
+        {
+          "path": "skills/commit-discipline/SKILL.md",
+          "sha256": "997d7cd9712f6a9e33edc260c19f2ca18b01f866bd584bee1eb38ef6b4f0d13e",
+          "mode": 420
+        },
+        {
+          "path": "skills/handoff-note/SKILL.md",
+          "sha256": "6d7c61f9d396bd48af7c50ef9c40af2afc0ce3373ea03ef5ad659774bf07b538",
+          "mode": 420
+        },
+        {
+          "path": "skills/test-first/SKILL.md",
+          "sha256": "068e09d395f4f489d5e6b3ca6965abcf00821cfc8c4d753e3cea87a51412b3ee",
+          "mode": 420
+        }
+      ]
+    },
+    {
+      "slug": "measured-writing-desk",
+      "name": "Measured Writing Desk",
+      "version": "1.0.0",
+      "target": "claude-code",
+      "modules": [
+        "skill/measured-article",
+        "skill/source-ledger",
+        "agent/fact-checker"
+      ],
+      "requiresBash": false,
+      "archive": {
+        "url": "https://buildguild.gg/dl/measured-writing-desk-1.0.0.zip",
+        "sha256": "c8054643291e7b4b4e83f340b6ef38ffb2bb487eca9be1054c65a3ed01d6beef",
+        "bytes": 3913
+      },
+      "files": [
+        {
+          "path": ".claude-plugin/plugin.json",
+          "sha256": "d603f2a3b115344d7acfd126f29b541a7e670c28ad2818d732f4c44ffdacd02a",
+          "mode": 420
+        },
+        {
+          "path": "LICENSE",
+          "sha256": "3efda37b6af8938515fce3a496354a63a45f511c0fa05ae09ca3a94477529c24",
+          "mode": 420
+        },
+        {
+          "path": "README.md",
+          "sha256": "0d4eeb16eea56f428a4580556ac4f784bc12a3bc44832f4ec1fd5f0ca319909e",
+          "mode": 420
+        },
+        {
+          "path": "agents/fact-checker.md",
+          "sha256": "4bb48b6661ee751d8f8670e8b860c0d7192db705b419fb9c27e6fd3b464fe644",
+          "mode": 420
+        },
+        {
+          "path": "buildguild.json",
+          "sha256": "1697d6ad5f0af1e83e3c1ddebb7429adbacbe34c64ba2d689685c719ee2508bf",
+          "mode": 420
+        },
+        {
+          "path": "skills/measured-article/SKILL.md",
+          "sha256": "f7382d7b4b7d554f8224044e07354feee61db1abfd42c5640472a0c9f0f0ede5",
+          "mode": 420
+        },
+        {
+          "path": "skills/source-ledger/SKILL.md",
+          "sha256": "33dd737453ab443f8555856590b0b1946812f5c89cc962a57a49d28c5369740b",
+          "mode": 420
+        }
+      ]
+    },
+    {
+      "slug": "evidence-first-review",
+      "name": "Evidence-First Review",
+      "version": "1.0.1",
+      "target": "claude-code",
+      "modules": [
+        "skill/pr-review-contract",
+        "skill/evidence-table",
+        "agent/independent-reviewer",
+        "hook/merge-guard"
+      ],
+      "requiresBash": true,
+      "archive": {
+        "url": "https://buildguild.gg/dl/evidence-first-review-1.0.1.zip",
+        "sha256": "5e041264fa3fea0a6c76ff56ce11a8c97ea326aa13cc126b58dd59601a7584ab",
+        "bytes": 6397
+      },
+      "files": [
+        {
+          "path": ".claude-plugin/plugin.json",
+          "sha256": "917f3a999c194b01b78923b23ded3fcd1f741fda32de955161ff499eba67d2fb",
+          "mode": 420
+        },
+        {
+          "path": "LICENSE",
+          "sha256": "3efda37b6af8938515fce3a496354a63a45f511c0fa05ae09ca3a94477529c24",
+          "mode": 420
+        },
+        {
+          "path": "README.md",
+          "sha256": "fedd453d8c6fbcea190a6887d865a546e5708fd7ff0960fffe2f9ecc7cbba86b",
+          "mode": 420
+        },
+        {
+          "path": "agents/independent-reviewer.md",
+          "sha256": "393be84ff3b694551611a38b68c2f39f5e1aa9b5abf617dd68c38e34763f2df3",
+          "mode": 420
+        },
+        {
+          "path": "buildguild.json",
+          "sha256": "89d827c1a9d1edacd5e6ad729d19f2bc50eaf3b212bbe4a6a1e9143cbdd0462d",
+          "mode": 420
+        },
+        {
+          "path": "hooks/hooks.json",
+          "sha256": "1416dd7ed1317ae61474576f56aaeab26196540fd1e10233613f4117a4e72d9b",
+          "mode": 420
+        },
+        {
+          "path": "scripts/merge-guard.sh",
+          "sha256": "e4eac3ec8ad24cd7939aeacdf7f3d5a9c2fb616f6c355481e5df4025dfa6fa81",
+          "mode": 493
+        },
+        {
+          "path": "skills/evidence-table/SKILL.md",
+          "sha256": "543afe78f837109f38e0e248107496d64fdf66943c8dc03129653bbb07e08ac8",
+          "mode": 420
+        },
+        {
+          "path": "skills/pr-review-contract/SKILL.md",
+          "sha256": "cb3c8e572c35a75e55a5409a67b83e204c75d94ecff0e29075cf37cdac1c3b71",
+          "mode": 420
+        }
+      ]
+    },
+    {
+      "slug": "trial-runner",
+      "name": "Trial Runner",
+      "version": "1.0.1",
+      "target": "claude-code",
+      "modules": [
+        "skill/run-trial",
+        "skill/write-eval-case"
+      ],
+      "requiresBash": false,
+      "archive": {
+        "url": "https://buildguild.gg/dl/trial-runner-1.0.1.zip",
+        "sha256": "7fe4a10092cf931a87f4be9d3700be433532f747d2e85e662e4c43ee3d5a2c09",
+        "bytes": 4010
+      },
+      "files": [
+        {
+          "path": ".claude-plugin/plugin.json",
+          "sha256": "7ba3eb83e41f41464d21b8357c83a5bd85e80e03f1cab82943d42fbec3d6f166",
+          "mode": 420
+        },
+        {
+          "path": "LICENSE",
+          "sha256": "3efda37b6af8938515fce3a496354a63a45f511c0fa05ae09ca3a94477529c24",
+          "mode": 420
+        },
+        {
+          "path": "README.md",
+          "sha256": "be1db90fb91e8a7bb17621d5e8158f85aaa6ebca1aaddcb61e0245afd80c58d7",
+          "mode": 420
+        },
+        {
+          "path": "buildguild.json",
+          "sha256": "6fa70a6e5ecc30fcc9cfce9ed4870606a4a2529ee2c48a8923c20e77eb5a82eb",
+          "mode": 420
+        },
+        {
+          "path": "skills/run-trial/SKILL.md",
+          "sha256": "e41724a7e41513b3603ed00c3ade669058181a2f80017618bb2bd9bf832f5409",
+          "mode": 420
+        },
+        {
+          "path": "skills/write-eval-case/SKILL.md",
+          "sha256": "480f677251452b5c0385fc27083f4cc0d317418681510e511c42a130ad2a2eae",
+          "mode": 420
+        }
+      ]
+    }
+  ]
+}

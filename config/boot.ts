@@ -13,6 +13,7 @@ import { reportStartupFailure } from '../app/helpers/startup.js';
 import { readyFilePath } from '../app/helpers/ready.js';
 import { HostSettings } from '../app/services/settings.js';
 import { composeHost } from './composition.js';
+import { loadGuildBuild } from '../app/services/guild-build.js';
 
 async function main(): Promise<void> {
   const runtime = resolveRuntime({ sourceEntry: fileURLToPath(import.meta.url), configFile: process.env.GROTESQUERIES_CONFIG });
@@ -23,11 +24,12 @@ async function main(): Promise<void> {
   const diagnostics = new DiagnosticLogger(runtime.root, operatorConfig.diagnostics);
   // Plugins live in <application root>/plugins; their profiles join the configured ones for this process only.
   const plugins = loadPlugins(path.join(runtime.root, 'plugins'), operatorConfig, diagnostics);
-  const config = { ...operatorConfig, launchProfiles: [...operatorConfig.launchProfiles, ...plugins.profiles] };
+  const guild = loadGuildBuild(runtime.root, { ...operatorConfig, launchProfiles: [...operatorConfig.launchProfiles, ...plugins.profiles] });
+  const config = guild.config;
   const assets = diskAssets(runtime.root);
   const host = composeHost({ config, runtime, assets, engine: () => createHost({ config, runtime, assets,
     sessions: new SessionRegistry({ config, launcher: new NodePtyLauncher(runtime.root), diagnostics, jobs: plugins.jobs }), diagnostics, plugins,
-    settings: new HostSettings(runtime.configFile, runtime.root, config.port),
+    settings: new HostSettings(runtime.configFile, runtime.root, config.port), guildBuild: guild.state,
     hostInstanceId: crypto.randomUUID(), token: crypto.randomBytes(32).toString('base64url'),
     ...(config.fleet?.coordinator ? {} : { ready: { file: readyFilePath(runtime.root), refusals: plugins.refused } }) }) });
   await host.listen();
