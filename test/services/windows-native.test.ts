@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
-import { fork, spawn, type ChildProcess } from 'node:child_process';
+import { fork, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import test from 'node:test';
+import { posixWindowsPath } from '../../app/helpers/runtime.js';
 import { NodePtyLauncher } from '../../app/services/node-pty.js';
 import { compileWindowsConsoleFixture, windowsConsoleFixtureCommand } from '../../bin/windows-console-fixture.mjs';
 import type { PtyHandle } from '../../app/services/pty.js';
@@ -68,7 +69,7 @@ async function exercise(name: string, directory: string): Promise<CaseReport> {
   const cleanupErrors: ErrorRecord[] = [], knownPids: number[] = [];
   const originalModules = Object.entries(process.env).filter(([key]) => key.toUpperCase() === 'PSMODULEPATH');
   try {
-    if (name === 'natural-exit') {
+    if (name === 'natural-exit' || name === 'minimal-app-environment') {
       const grandchild = 'setInterval(()=>{},1000)';
       const child = `const child=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{detached:true,windowsHide:true,stdio:'ignore'});process.send({child:process.pid,grandchild:child.pid});setInterval(()=>{},1000)`;
       const source = `const child=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(child)}],{detached:true,windowsHide:true,stdio:['ignore','ignore','ignore','ipc']});child.on('message',value=>console.log('TREE:'+JSON.stringify(value)));process.stdin.setRawMode(true);process.stdin.on('data',()=>{console.log('WINDOWS_ROOT_FINAL');process.exit(7)});setInterval(()=>{},1000)`;
@@ -148,11 +149,39 @@ async function exercise(name: string, directory: string): Promise<CaseReport> {
   return { name, passed: !primary && !cleanupErrors.length && cleanupVerified, cleanupVerified, knownPids, primary, cleanupErrors };
 }
 
+/** Node/libuv restores some missing Windows identity variables during process creation.
+ * Normalize only this isolated control before any application/runtime module imports. */
+function exactEnvironmentPreload(directory: string, names: string[]): string {
+  const file = path.join(directory, 'exact-environment-preload.cjs');
+  const expected = [...new Set(names.map(name => name.toUpperCase()))].sort();
+  fs.writeFileSync(file, `const expected=${JSON.stringify(expected)};const allowed=new Set(expected);
+` +
+    `for(const name of Object.keys(process.env))if(!allowed.has(name.toUpperCase()))delete process.env[name];
+` +
+    `const actual=Object.keys(process.env).map(name=>name.toUpperCase()).sort();
+` +
+    `if(actual.length!==expected.length||actual.some((name,index)=>name!==expected[index]))throw Error('WINDOWS_NATIVE_EXACT_ENV_KEYS');
+`, { flag: 'wx' });
+  return file;
+}
+
 /** Native addons remain mapped until their loading process exits. Only the parent removes that process's fixture. */
 async function isolated(name: string, directory: string): Promise<void> {
-  const environment = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
+  let environment: NodeJS.ProcessEnv = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
+  if (name === 'minimal-app-environment') {
+    const windows = process.env.SystemRoot ?? process.env.SYSTEMROOT!;
+    const powershell = path.join(windows, 'System32/WindowsPowerShell/v1.0/powershell.exe');
+    const temporary = path.join(directory, '.runtime/tmp'); fs.mkdirSync(temporary, { recursive: true });
+    environment = { PATH: [path.join(windows, 'System32'), path.dirname(powershell)].join(';'), NODE_PATH: '', NODE_OPTIONS: '',
+      WS_NO_BUFFER_UTIL: '1', WS_NO_UTF_8_VALIDATE: '1', TEMP: temporary, TMP: temporary, TMPDIR: posixWindowsPath(temporary) };
+    for (const name of ['SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE', 'COMSPEC', 'PATHEXT', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+      'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMDATA', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS']) {
+      const value = Object.entries(process.env).find(([key]) => key.toUpperCase() === name)?.[1]; if (value !== undefined) environment[name] = value;
+    }
+  }
+  const execArgv = name === 'minimal-app-environment' ? ['--require', exactEnvironmentPreload(directory, Object.keys(environment))] : [];
   const child = fork(__filename, ['--windows-native-worker', name, directory], {
-    execArgv: [], env: environment, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true,
+    execArgv, env: environment, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true,
   });
   let report: CaseReport | undefined, output = '', errors = '', timedOut = false;
   child.stdout?.on('data', data => { output = (output + data).slice(-65536); });
@@ -217,6 +246,19 @@ if (worker) {
       assert.equal(JSON.parse(fs.readFileSync(path.join(failed, 'case-report.json'), 'utf8')).cleanupVerified, false);
     } finally { fs.rmSync(failed, { recursive: true, force: true }); }
   });
+  test('isolated environment preload removes restored keys before application imports without logging values', () => {
+    const directory = fixtureDirectory();
+    try {
+      const preload = exactEnvironmentPreload(directory, ['OWNED_EXPECTED']);
+      const child = spawnSync(process.execPath, ['--require', preload, '-e',
+        "require('node:assert/strict').deepEqual(Object.keys(process.env),['OWNED_EXPECTED']);if(process.env.OWNED_EXPECTED!=='kept')process.exit(23)"],
+        { env: { OWNED_EXPECTED: 'kept', OWNED_RESTORED: 'owned-private-marker' }, windowsHide: true, encoding: 'utf8', timeout: 5000 });
+      assert.equal(child.status, 0, child.stderr); assert.equal(child.stdout, '');
+      assert.equal(fs.readFileSync(preload, 'utf8').includes('owned-private-marker'), false);
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+  test('Windows natural-exit cleanup and sibling isolation use the exact minimal SEA app environment', { skip, timeout: workerBudgetMs + 5000 },
+    () => isolated('minimal-app-environment', fixtureDirectory()));
   test('Windows natural root exit retains child/grandchild ownership and late exit subscribers until verified Stop', { skip, timeout: workerBudgetMs + 5000 },
     () => isolated('natural-exit', fixtureDirectory()));
   test('Windows native ReadConsoleW witness receives exact ASCII and Unicode UTF16 input', { skip, timeout: workerBudgetMs + 5000 },

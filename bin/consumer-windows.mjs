@@ -12,6 +12,7 @@ import { inflateRawSync, crc32 } from 'node:zlib';
 import WebSocket from 'ws';
 import Headless from '@xterm/headless';
 import Unicode11 from '@xterm/addon-unicode11';
+import { sanitizeNativeStopFailure } from '../lib/local-web/native-command-diagnostics.mjs';
 import { compileWindowsConsoleFixture, windowsConsoleFixtureCommand } from './windows-console-fixture.mjs';
 import { assertNoEmbeddedAuthenticode } from './windows-pe.mjs';
 import { startOwnedWindowsHost, probeWindowsPowerShell } from './windows-host-fixture.mjs';
@@ -217,7 +218,7 @@ export async function cleanupWindowsConsumer(scratch, ownedHost, fixturePids, pr
 /** Whitelisted lifecycle metadata only; never copy logs, IDs, payloads or native error text. */
 export function windowsHostLifecycle(folder, hostInstanceId) {
   const allowed = new Set(['host-start', 'host-signal', 'host-stop-start', 'host-stop-sessions', 'host-stop-websockets', 'host-stop-http', 'host-stop', 'pty-error']);
-  const events = {}, codes = {}; const directory = path.join(folder, '.runtime/logs');
+  const events = {}, codes = {}, nativeFailures = []; const directory = path.join(folder, '.runtime/logs');
   if (hostInstanceId && fs.existsSync(directory)) for (const name of fs.readdirSync(directory).filter(name => /^host-\d+\.log$/.test(name)).slice(0, 100)) {
     const file = path.join(directory, name), stat = fs.lstatSync(file);
     if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) continue;
@@ -225,10 +226,12 @@ export function windowsHostLifecycle(folder, hostInstanceId) {
       let entry; try { entry = JSON.parse(line); } catch { continue; }
       if (entry.hostInstanceId !== hostInstanceId || !allowed.has(entry.event)) continue;
       events[entry.event] = (events[entry.event] ?? 0) + 1;
+      const nativeFailure = sanitizeNativeStopFailure(entry.nativeFailure);
+      if (nativeFailure && nativeFailures.length < 32) nativeFailures.push(nativeFailure);
       if (typeof entry.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(entry.code)) codes[entry.code] = (codes[entry.code] ?? 0) + 1;
     }
   }
-  return { readyFilePresent: fs.existsSync(path.join(folder, '.runtime/host-ready.json')), events, codes };
+  return { readyFilePresent: fs.existsSync(path.join(folder, '.runtime/host-ready.json')), events, codes, ...(nativeFailures.length ? { nativeFailures } : {}) };
 }
 
 export function assertWindowsHostShutdown(folder, hostInstanceId) {

@@ -291,3 +291,35 @@ test('final shutdown proof excludes previous host instances and partial shutdown
   fs.appendFileSync(file, JSON.stringify({ hostInstanceId: 'current', event: 'pty-error', code: 'HOST_SHUTDOWN_FAILED' }) + '\n');
   assert.throws(() => assertWindowsHostShutdown(folder, 'current'), /current host cleanup must succeed/);
 }));
+
+test('native cleanup evidence rejects unknown fields, private error data and invalid numeric bounds', async () => {
+  const { sanitizeNativeCommand, sanitizeNativeStopFailure, nativeStopFailure } = await import('../../lib/local-web/native-command-diagnostics.mjs');
+  const command = { phase: 'snapshot', kind: 'timeout', elapsedMs: 5001, timeoutMs: 5000, code: null, signal: 'SIGTERM', killed: true, stdoutBytes: 0, stderrBytes: 11 };
+  assert.deepEqual(sanitizeNativeCommand(command), command);
+  assert.deepEqual(sanitizeNativeCommand({ ...command, kind: 'exit', code: 0xc0000005 }), { ...command, kind: 'exit', code: 0xc0000005 });
+  assert.equal(sanitizeNativeCommand({ ...command, code: 0x100000000 }), undefined);
+  assert.equal(sanitizeNativeCommand({ ...command, code: -2147483649 }), undefined);
+  for (const altered of [{ ...command, raw: 'private' }, { ...command, phase: 'private' }, { ...command, elapsedMs: Infinity },
+    { ...command, stdoutBytes: 16777217 }, { ...command, timeoutMs: 5001 }, { ...command, code: 'PRIVATE_ERROR' }, { ...command, signal: 'private' }]) {
+    assert.equal(sanitizeNativeCommand(altered), undefined);
+  }
+  let accessed = false; const getter = { ...command };
+  Object.defineProperty(getter, 'elapsedMs', { enumerable: true, get() { accessed = true; return 123; } });
+  assert.equal(sanitizeNativeCommand(getter), undefined); assert.equal(accessed, false);
+  assert.equal(sanitizeNativeStopFailure({ code: 'STOP_TREE_FAILED', command, cause: 'private' }), undefined);
+  assert.equal(sanitizeNativeStopFailure({ code: 'PRIVATE_FAILURE' }), undefined);
+  assert.deepEqual(nativeStopFailure(new Error('private message', { cause: new Error('private cause') })), { code: 'STOP_UNKNOWN' });
+});
+
+test('current-host native failure summary retains only the bounded existing command metadata', async () => fixture(folder => {
+  const logs = path.join(folder, '.runtime/logs'); fs.mkdirSync(logs, { recursive: true });
+  const command = { phase: 'snapshot', kind: 'invalid-row', elapsedMs: 123, timeoutMs: 5000, code: 0, signal: null, killed: false, stdoutBytes: 1000, stderrBytes: 0 };
+  const failure = { code: 'STOP_METADATA_FAILED', command };
+  fs.writeFileSync(path.join(logs, 'host-0.log'), [
+    { event: 'pty-error', hostInstanceId: 'current', code: 'STOP_FAILED', nativeFailure: failure, message: 'owned-private-data' },
+    { event: 'pty-error', hostInstanceId: 'previous', code: 'STOP_FAILED', nativeFailure: failure },
+    { event: 'pty-error', hostInstanceId: 'current', nativeFailure: { ...failure, stdout: 'owned-private-data' } },
+  ].map(row => JSON.stringify(row) + '\n').join(''));
+  const summary = windowsHostLifecycle(folder, 'current');
+  assert.deepEqual(summary.nativeFailures, [failure]); assert.equal(JSON.stringify(summary).includes('owned-private-data'), false);
+}));

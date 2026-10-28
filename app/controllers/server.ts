@@ -22,6 +22,7 @@ export function createHost(options: { config: Config; runtime: Runtime; assets: 
   settings?: HostSettings;
   ready?: { file: string; refusals: ReadyRecord['refusals'] } }) {
   const { assets, sessions, diagnostics, hostInstanceId, token } = options;
+  sessions.bindDiagnosticHost(hostInstanceId);
   let config = options.config;
   let guildBuild = options.guildBuild;
   const pluginProfiles = config.launchProfiles.filter(profile => options.plugins?.summaries.some(plugin =>
