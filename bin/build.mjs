@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
-import { distributionMetadata } from './licenses.mjs';
+import { assertSourceNode, distributionMetadata } from './licenses.mjs';
 import { buildNative } from './native-build.mjs';
 
 export const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -17,6 +17,7 @@ export function frameFolder() {
 }
 
 export async function build(watch = false) {
+  assertSourceNode(root);
   fs.mkdirSync(path.join(root, 'public'), { recursive: true });
   distributionMetadata(root);
   buildNative(root);

@@ -3,6 +3,12 @@ import path from 'node:path';
 import { createRequire } from 'node:module';
 import crypto from 'node:crypto';
 
+export function assertSourceNode(root, actualVersion = process.version) {
+  const required = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).engines?.node;
+  if (typeof required !== 'string' || !/^\d+\.\d+\.\d+$/.test(required)) throw new Error('NODE_VERSION_PIN_INVALID: Source builds need an exact Node version in package.json.');
+  if (actualVersion !== 'v' + required) throw new Error(`NODE_VERSION_UNSUPPORTED: Grotesqueries source builds require Node.js v${required}; found ${actualVersion}. Select Node ${required} in this shell, then retry. If you use nvm: nvm install ${required} && nvm use ${required}.`);
+}
+
 export function distributionMetadata(root) {
   const require = createRequire(path.join(root, 'app/package.json'));
   const names = ['node-pty', 'ws', '@xterm/headless', '@xterm/addon-serialize', '@xterm/xterm', '@xterm/addon-unicode11'];

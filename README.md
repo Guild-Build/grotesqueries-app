@@ -24,16 +24,19 @@ ownership for a retry. See [platform behavior](docs/platform-support.md).
 
 ## Build from source
 
-Use Node **24.14.1**, npm, and the platform C compiler: Apple's Command Line Tools
+Use exactly Node **24.14.1** with npm; newer Node versions are not supported by this source release. Select it in your current shell before building. If you already use nvm, run `nvm install 24.14.1 && nvm use 24.14.1`. Otherwise, use the [official Node 24.14.1 distribution](https://nodejs.org/download/release/v24.14.1/). You also need the platform C compiler: Apple's Command Line Tools
 on Mac or a C compiler and libc development headers on Linux. Mac builds target
 macOS 15 or later. This build target alone does not establish release qualification.
 
 ```sh
-npm ci --ignore-scripts
-npm run build
-npm run setup:posix
+node -e 'if (process.version !== "v24.14.1") { console.error("Use Node v24.14.1; found " + process.version); process.exit(1) }' &&
+npm ci --ignore-scripts &&
+npm run build &&
+npm run setup:posix &&
 npm run start:posix
 ```
+
+The command chain stops if a step fails. A detached HEAD after cloning a release tag is expected.
 
 Setup creates `.runtime/posix/grotesqueries.json`, discovers installed shells and
 optional CLIs without running them, and preserves an existing configuration.
