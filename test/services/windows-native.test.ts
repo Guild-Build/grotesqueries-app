@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { fork, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import test from 'node:test';
 import { posixWindowsPath } from '../../app/helpers/runtime.js';
-import { getProcessSnapshot } from '../../app/services/process-tree.js';
+import { getProcessSnapshot, executeWindowsCommand } from '../../app/services/process-tree.js';
 import { nativeStopFailure, type NativeStopFailure } from '../../lib/local-web/native-command-diagnostics.mjs';
 import { NodePtyLauncher } from '../../app/services/node-pty.js';
 import { compileWindowsConsoleFixture, windowsConsoleFixtureCommand } from '../../bin/windows-console-fixture.mjs';
@@ -22,7 +23,8 @@ const alive = (pid: number): boolean => {
 type DiagnosticValue = string | number | boolean | null;
 type ErrorRecord = { message: string; stack?: string; code?: string | number | null; signal?: string | null; killed?: boolean;
   stdoutBytes?: number; stderrBytes?: number; diagnostics?: Record<string, DiagnosticValue>; cause?: ErrorRecord };
-type SnapshotProbe = { id: string; queryPassed: boolean; elapsedMs: number; validatedRows?: number; failure?: NativeStopFailure };
+type SnapshotProbe = { id: string; queryPassed: boolean; elapsedMs: number; validatedRows?: number; failure?: NativeStopFailure;
+  mode?: 'actual' | 'cim-phases' | 'management-phases'; stages?: string[]; storedPolicy?: Record<string, string> };
 type CaseReport = { name: string; passed: boolean; cleanupVerified: boolean; knownPids: number[];
   primary?: ErrorRecord; cleanupErrors: ErrorRecord[]; snapshotProbe?: SnapshotProbe };
 function recordError(error: unknown, depth = 0): ErrorRecord {
@@ -180,14 +182,54 @@ function minimalAppEnvironment(directory: string): NodeJS.ProcessEnv {
   }
   return environment;
 }
-async function snapshotProbe(name: string, read: () => Promise<unknown[]> = () => getProcessSnapshot(5000)): Promise<CaseReport> {
-  const started = performance.now(); let result: SnapshotProbe;
-  try {
-    const rows = await read();
-    result = { id: name.slice('snapshot-probe-'.length), queryPassed: true, elapsedMs: Math.round(performance.now() - started), validatedRows: rows.length };
-  } catch (error) {
-    result = { id: name.slice('snapshot-probe-'.length), queryPassed: false, elapsedMs: Math.round(performance.now() - started), failure: nativeStopFailure(error) };
+const policyNames = ['AllSigned', 'Bypass', 'Default', 'RemoteSigned', 'Restricted', 'Undefined', 'Unrestricted', 'Absent', 'Unrecognized'];
+const policyScopes = ['ProcessEnvironment', 'CurrentUser', 'LocalMachine', 'UserPolicy', 'MachinePolicy'];
+function parseProbeReceipts(stderr: string, nonce: string): { stages: string[]; storedPolicy: Record<string, string> } {
+  const stages: string[] = [], storedPolicy: Record<string, string> = {};
+  for (const line of stderr.split(/\r?\n/)) {
+    const prefix = 'GQPH:' + nonce + ':'; if (!line.startsWith(prefix)) continue;
+    const [kind, key, value, extra] = line.slice(prefix.length).split(':'); if (extra !== undefined) continue;
+    if (kind === 'stage' && ['started', 'cim-imported', 'management-loaded', 'query-complete', 'json-complete'].includes(key) && value === undefined && stages.length < 8) stages.push(key);
+    if (kind === 'policy' && policyScopes.includes(key) && policyNames.includes(value)) storedPolicy[key] = value;
   }
+  return { stages, storedPolicy };
+}
+function phaseProbeSource(mode: 'cim-phases' | 'management-phases', nonce: string): string {
+  const emit = (stage: string) => `[Console]::Error.WriteLine('GQPH:${nonce}:stage:${stage}'); [Console]::Error.Flush();`;
+  // Read stored policy enums only. Never assign a policy/cache variable or invoke Set-ExecutionPolicy.
+  const policy = `function EmitPolicy($scope,$raw) { $name='Unrecognized'; if($null -eq $raw){$name='Absent'} else { foreach($known in @('AllSigned','Bypass','Default','RemoteSigned','Restricted','Undefined','Unrestricted')) { if([string]::Equals([string]$raw,$known,[StringComparison]::OrdinalIgnoreCase)){$name=$known;break} } }; [Console]::Error.WriteLine('GQPH:${nonce}:policy:'+$scope+':'+$name); [Console]::Error.Flush() }; ` +
+    `EmitPolicy 'ProcessEnvironment' ([Environment]::GetEnvironmentVariable('PSExecutionPolicyPreference')); ` +
+    `foreach($scope in @('CurrentUser','LocalMachine','UserPolicy','MachinePolicy')) { try { ` +
+    `$root=if($scope -eq 'CurrentUser' -or $scope -eq 'UserPolicy'){'HKEY_CURRENT_USER'}else{'HKEY_LOCAL_MACHINE'}; ` +
+    `$sub=if($scope -eq 'UserPolicy' -or $scope -eq 'MachinePolicy'){'Software\\Policies\\Microsoft\\Windows\\PowerShell'}else{'Software\\Microsoft\\PowerShell\\1\\ShellIds\\Microsoft.PowerShell'}; ` +
+    `$raw=[Microsoft.Win32.Registry]::GetValue($root+'\\'+$sub,'ExecutionPolicy',$null); EmitPolicy $scope $raw } catch { EmitPolicy $scope '__UNRECOGNIZED_FIXED' } }; `;
+  const projectCim = `Microsoft.PowerShell.Core\\Import-Module CimCmdlets -ErrorAction Stop; ${emit('cim-imported')} ` +
+    `$rows=@(CimCmdlets\\Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate -ErrorAction Stop); ${emit('query-complete')} ` +
+    `$rows | Microsoft.PowerShell.Utility\\Select-Object ProcessId,ParentProcessId,@{n='CreationDate';e={$_.CreationDate.ToUniversalTime().ToString('o')}} | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress; ${emit('json-complete')}`;
+  const projectManagement = `Microsoft.PowerShell.Utility\\Add-Type -AssemblyName System.Management; ${emit('management-loaded')} ` +
+    `$searcher=[System.Management.ManagementObjectSearcher]::new('root\\cimv2','SELECT ProcessId,ParentProcessId,CreationDate FROM Win32_Process'); $collection=$null; ` +
+    `try { $collection=$searcher.Get(); $rows=[Collections.Generic.List[object]]::new(); foreach($item in $collection) { try { ` +
+    `$birth=$item['CreationDate']; if($null -eq $birth -or [string]$birth -notmatch '^\\d{14}\\.\\d{6}[+-]\\d{3}$'){throw 'NATIVE_PROBE_BIRTH_INVALID'}; ` +
+    `[void]$rows.Add([pscustomobject]@{ProcessId=$item['ProcessId'];ParentProcessId=$item['ParentProcessId'];CreationDate=[System.Management.ManagementDateTimeConverter]::ToDateTime([string]$birth).ToUniversalTime().ToString('o')}) ` +
+    `} finally {$item.Dispose()} }; ${emit('query-complete')} ` +
+    `$rows.ToArray() | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress; ${emit('json-complete')} ` +
+    `} finally {try {if($null -ne $collection){$collection.Dispose()}} finally {$searcher.Dispose()}}`;
+  return "$ErrorActionPreference='Stop';" + emit('started') + policy + (mode === 'cim-phases' ? projectCim : projectManagement);
+}
+async function snapshotProbe(name: string, read?: () => Promise<unknown[]>): Promise<CaseReport> {
+  const started = performance.now(), nonce = crypto.randomBytes(16).toString('hex'); let result: SnapshotProbe, stderr = '';
+  const mode = name.includes('cim-phases') ? 'cim-phases' : name.includes('management-phases') ? 'management-phases' : 'actual';
+  const query = read ?? (mode === 'actual' ? () => getProcessSnapshot(5000) : () => getProcessSnapshot(5000, async (phase, _source, options) => {
+    try { const response = await executeWindowsCommand(phase, phaseProbeSource(mode, nonce), options); stderr = response.stderr ?? ''; return response; }
+    catch (error) { const value = (error as { stderr?: unknown }).stderr; if (typeof value === 'string') stderr = value; throw error; }
+  }));
+  try {
+    const rows = await query();
+    result = { id: name.slice('snapshot-probe-'.length), mode, queryPassed: true, elapsedMs: Math.round(performance.now() - started), validatedRows: rows.length };
+  } catch (error) {
+    result = { id: name.slice('snapshot-probe-'.length), mode, queryPassed: false, elapsedMs: Math.round(performance.now() - started), failure: nativeStopFailure(error) };
+  }
+  if (mode !== 'actual') Object.assign(result, parseProbeReceipts(stderr, nonce));
   return { name, passed: true, cleanupVerified: true, knownPids: [], cleanupErrors: [], snapshotProbe: result };
 }
 
@@ -289,53 +331,65 @@ if (worker) {
     assert.equal(failure.snapshotProbe?.queryPassed, false); assert.equal(failure.snapshotProbe?.failure?.command?.kind, 'timeout');
     assert.equal(JSON.stringify(failure).includes(marker), false); assert.equal(failure.cleanupVerified, true);
   });
+  test('phase receipt parser accepts only fixed stages and stored policy enums without native output', () => {
+    const nonce = 'owned-nonce', privateMarker = 'owned-private-output';
+    const receipt = parseProbeReceipts([
+      privateMarker, 'GQPH:wrong:stage:started', 'GQPH:'+nonce+':stage:started',
+      'GQPH:'+nonce+':policy:ProcessEnvironment:Bypass', 'GQPH:'+nonce+':policy:CurrentUser:'+privateMarker,
+      'GQPH:'+nonce+':stage:query-complete:'+privateMarker,
+    ].join('\r\n'), nonce);
+    assert.deepEqual(receipt, { stages: ['started'], storedPolicy: { ProcessEnvironment: 'Bypass' } });
+    assert.equal(JSON.stringify(receipt).includes(privateMarker), false);
+    for (const mode of ['cim-phases', 'management-phases'] as const) {
+      const source = phaseProbeSource(mode, nonce);
+      assert.doesNotMatch(source, /Set-ExecutionPolicy|-ExecutionPolicy |SetEnvironmentVariable/);
+      assert.ok(source.includes('GetEnvironmentVariable')); assert.ok(source.includes('Registry]::GetValue'));
+    }
+    const source = phaseProbeSource('management-phases', nonce), slash = String.fromCharCode(92);
+    assert.ok(source.includes('root'+slash+'cimv2'));
+    assert.ok(source.includes('^'+slash+'d{14}'+slash+'.'+slash+'d{6}[+-]'+slash+'d{3}$'));
+    assert.ok(source.includes('.ToUniversalTime().ToString')); assert.ok(source.includes('$collection.Dispose()')); assert.ok(source.includes('$searcher.Dispose()'));
+  });
   test('Windows natural-exit cleanup and sibling isolation use the exact minimal SEA app environment', { skip, timeout: workerBudgetMs + 5000 },
     () => isolated('minimal-app-environment', fixtureDirectory()));
   test('Windows natural root exit retains child/grandchild ownership and late exit subscribers until verified Stop', { skip, timeout: workerBudgetMs + 5000 },
     () => isolated('natural-exit', fixtureDirectory()));
-  test('read-only Windows snapshot matrix isolates standard OS context without changing cleanup rules', { skip, timeout: 22 * (7000 + 5000 + 5000) }, async () => {
+  test('read-only Windows snapshot phase and PATH cross-controls preserve policy and strict metadata gates', { skip, timeout: 9 * (7000 + 5000 + 5000) }, async () => {
     const shared = fixtureDirectory(), results: SnapshotProbe[] = [];
     const reportFile = path.join(process.cwd(), '.runtime/test/windows-snapshot-matrix.json');
+    const inheritedOnlyKeyNames = new Set<string>();
+    const observedContextPresence: Record<string, { minimal: boolean; inherited: boolean }> = {};
     fs.mkdirSync(path.dirname(reportFile), { recursive: true });
-    const persist = () => fs.writeFileSync(reportFile, JSON.stringify({ readOnly: true, queryTimeoutMs: 5000, maximumVariants: 22, results }, null, 2) + '\n');
+    const persist = () => fs.writeFileSync(reportFile, JSON.stringify({ readOnly: true, queryTimeoutMs: 5000, maximumVariants: 9,
+      inheritedOnlyKeyNames: [...inheritedOnlyKeyNames].sort(), contextPresenceBeforeHelperPin: observedContextPresence, results }, null, 2) + '\n');
     try {
       const minimal = minimalAppEnvironment(shared);
       const inherited: NodeJS.ProcessEnv = { ...process.env, TEMP: minimal.TEMP, TMP: minimal.TMP, TMPDIR: minimal.TMPDIR };
       delete inherited.NODE_TEST_CONTEXT;
+      const minimalNames = new Set(Object.keys(minimal).map(name => name.toUpperCase()));
+      const inheritedNames = new Set(Object.keys(inherited).map(name => name.toUpperCase()));
+      for (const name of ['PSExecutionPolicyPreference', 'PSModuleAnalysisCachePath', 'PSDisableModuleAnalysisCacheCleanup', '__PSLockdownPolicy',
+        'PSModulePath', 'POWERSHELL_DISTRIBUTION_CHANNEL', 'POWERSHELL_TELEMETRY_OPTOUT']) {
+        observedContextPresence[name] = { minimal: minimalNames.has(name.toUpperCase()), inherited: inheritedNames.has(name.toUpperCase()) };
+      }
+      for (const name of Object.keys(inherited)) if (!minimalNames.has(name.toUpperCase()) && /^[A-Za-z_][A-Za-z0-9_()]{0,63}$/.test(name) && inheritedOnlyKeyNames.size < 128) inheritedOnlyKeyNames.add(name);
       const windows = process.env.SystemRoot ?? process.env.SYSTEMROOT!;
-      const identityNames = ['COMPUTERNAME', 'USERNAME', 'USERDOMAIN', 'USERDOMAIN_ROAMINGPROFILE', 'LOGONSERVER', 'HOMEDRIVE', 'HOMEPATH'];
-      const value = (name: string) => Object.entries(process.env).find(([key]) => key.toUpperCase() === name)?.[1];
-      const withNames = (base: NodeJS.ProcessEnv, names: string[]) => {
-        const environment = { ...base }; for (const name of names) { const found = value(name); if (found !== undefined) environment[name] = found; } return environment;
-      };
       const windowsPath = [windows, path.join(windows, 'System32'), path.join(windows, 'System32/Wbem'), path.join(windows, 'System32/WindowsPowerShell/v1.0')].join(';');
-      const probe = async (id: string, environment: NodeJS.ProcessEnv) => {
-        if (results.length >= 22) throw new Error('WINDOWS_NATIVE_PROBE_LIMIT');
-        let result: SnapshotProbe | undefined;
-        await isolated('snapshot-probe-' + id, fixtureDirectory(), { environment, collect: observed => { result = observed; results.push(observed); persist(); } });
-        if (!result) throw new Error('WINDOWS_NATIVE_PROBE_REPORT_MISSING');
-        console.log('Windows read-only snapshot probe: ' + JSON.stringify(result)); return result;
-      };
-      await probe('minimal-first', minimal);
-      const reference = await probe('inherited-reference', inherited);
-      const identity = await probe('identity-group', withNames(minimal, identityNames));
-      const osPath = await probe('windows-path', { ...minimal, PATH: windowsPath });
-      const both = await probe('identity-and-path', withNames({ ...minimal, PATH: windowsPath }, identityNames));
-      if (identity.queryPassed || both.queryPassed) {
-        const base = identity.queryPassed ? minimal : { ...minimal, PATH: windowsPath };
-        const available = identityNames.filter(name => value(name) !== undefined); let singletonPassed = false;
-        for (const name of available) {
-          const result = await probe('identity-only-' + name.toLowerCase().replaceAll('_', '-'), withNames(base, [name]));
-          singletonPassed ||= result.queryPassed;
-        }
-        if (!singletonPassed) for (const omitted of available) await probe('identity-without-' + omitted.toLowerCase().replaceAll('_', '-'), withNames(base, available.filter(name => name !== omitted)));
+      const pathKey = Object.keys(inherited).find(name => name.toUpperCase() === 'PATH');
+      const inheritedWindowsPath = Object.fromEntries(Object.entries(inherited).filter(([key]) => key.toUpperCase() !== 'PATH'));
+      inheritedWindowsPath.PATH = windowsPath;
+      const cases: Array<[string, NodeJS.ProcessEnv]> = [
+        ['actual-minimal-first', minimal], ['actual-inherited', inherited], ['actual-inherited-windows-path', inheritedWindowsPath],
+        ['actual-minimal-inherited-path', { ...minimal, PATH: pathKey ? inherited[pathKey] : '' }],
+        ['cim-phases-minimal', minimal], ['cim-phases-inherited', inherited],
+        ['management-phases-minimal', minimal], ['management-phases-inherited', inherited], ['actual-minimal-last', minimal],
+      ];
+      for (const [id, environment] of cases) {
+        if (results.length >= 9) throw new Error('WINDOWS_NATIVE_PROBE_LIMIT');
+        await isolated('snapshot-probe-' + id, fixtureDirectory(), { environment, collect: observed => { results.push(observed); persist(); } });
+        console.log('Windows read-only snapshot probe: ' + JSON.stringify(results[results.length - 1]));
       }
-      if (osPath.queryPassed) {
-        await probe('path-root-only', { ...minimal, PATH: windows + ';' + minimal.PATH });
-        await probe('path-wbem-only', { ...minimal, PATH: minimal.PATH + ';' + path.join(windows, 'System32/Wbem') });
-      }
-      await probe('minimal-last', minimal);
-      assert.equal(reference.queryPassed, true, 'The equal-temp inherited reference must return a complete validated snapshot');
+      assert.equal(results.find(result => result.id === 'actual-inherited')?.queryPassed, true, 'The equal-temp inherited reference must return a complete validated snapshot');
     } finally { persist(); fs.rmSync(shared, { recursive: true, force: true }); }
   });
   test('Windows native ReadConsoleW witness receives exact ASCII and Unicode UTF16 input', { skip, timeout: workerBudgetMs + 5000 },

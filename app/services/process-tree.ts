@@ -25,7 +25,8 @@ export function windowsProcessHelperEnvironment(parent: NodeJS.ProcessEnv): Node
   return { ...Object.fromEntries(Object.entries(parent).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH')),
     PSModulePath: path.win32.join(systemRoot, 'System32/WindowsPowerShell/v1.0/Modules') };
 }
-const executeWindowsCommand: WindowsProcessCommand = (_phase, source, options) => execute(resolveExecutable(powershell),
+// Shared with read-only qualification controls; no script/row contents enter diagnostics.
+export const executeWindowsCommand: WindowsProcessCommand = (_phase, source, options) => execute(resolveExecutable(powershell),
   ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', source], { windowsHide: true, ...options, env: windowsProcessHelperEnvironment(process.env) });
 const snapshotSource = "$ErrorActionPreference='Stop'; CimCmdlets\\Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate -ErrorAction Stop | " +
   "Microsoft.PowerShell.Utility\\Select-Object ProcessId,ParentProcessId,@{n='CreationDate';e={$_.CreationDate.ToUniversalTime().ToString('o')}} | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress";
