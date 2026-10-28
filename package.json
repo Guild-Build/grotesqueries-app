@@ -10,10 +10,10 @@
     "frame"
   ],
   "engines": {
-    "node": ">=24"
+    "node": "24.14.1"
   },
   "scripts": {
-    "build": "npm run build --workspace lib/protocol && npm run build --workspace frame && node bin/build.mjs",
+    "build": "node bin/check-node.mjs && npm run build --workspace lib/protocol && npm run build --workspace frame && node bin/build.mjs",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "node bin/test.mjs",
     "typecheck:test": "tsc -p test/tsconfig.json",
