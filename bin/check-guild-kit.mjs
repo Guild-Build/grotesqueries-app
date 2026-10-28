@@ -146,8 +146,9 @@ export function fixtureCLI(folder, tools, recordFile, environment, powershell) {
       Console.WriteLine("GUILD_KIT_FIXTURE_READY"); string line; while((line=Console.ReadLine())!=null) { Console.WriteLine("GUILD_KIT_FIXTURE_ACK:"+line); }
     } }`;
     const executable = path.join(tools, 'claude.exe');
-    const script = `$ErrorActionPreference='Stop'; Add-Type -TypeDefinition ${psQuote(source)} -OutputAssembly ${psQuote(executable)} -OutputType ConsoleApplication`;
-    run(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { cwd: tools, env: environment }, 'compile owned fixture');
+    const script = `$ErrorActionPreference='Stop'; Microsoft.PowerShell.Utility\\Add-Type -TypeDefinition ${psQuote(source)} -OutputAssembly ${psQuote(executable)} -OutputType ConsoleApplication`;
+    run(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')], { cwd: tools, env: { ...Object.fromEntries(Object.entries(environment).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH')),
+      PSModulePath: path.join(path.dirname(powershell), 'Modules') } }, 'compile owned fixture');
   } else {
     const probe = path.join(tools, 'fixture.cjs');
     fs.writeFileSync(probe, `const fs=require('node:fs');fs.writeFileSync(process.env.GUILD_KIT_PROBE_FILE,[process.cwd(),...process.argv.slice(2)].join('\\n')+'\\n');process.stdout.write('GUILD_KIT_FIXTURE_READY\\n');require('node:readline').createInterface({input:process.stdin}).on('line',line=>process.stdout.write('GUILD_KIT_FIXTURE_ACK:'+line+'\\n'));\n`);
@@ -211,6 +212,21 @@ export function checkBuildHooks(build, bundle, workspace, environment) {
   fail('unknown hook-bearing build');
 }
 
+/** Complete owned host cleanup while retaining evidence from every failed qualification. */
+export async function finalizeGuildKitFixture(scratch, { host, cleaned = false, primaryFailure } = {}) {
+  if (host) {
+    try { await host.stop(); await host.dispose?.(); }
+    catch (error) {
+      try { await host.abort?.(); } catch (recovery) { throw new AggregateError([...(primaryFailure === undefined ? [] : [primaryFailure]), error, recovery], 'GUILD_KIT_HOST_CLEANUP_FAILED'); }
+      if (primaryFailure !== undefined) throw new AggregateError([primaryFailure, error], 'GUILD_KIT_HOST_CLEANUP_FAILED');
+      throw error;
+    }
+  }
+  // A rejected launcher can still own a controller whose closure was not verified.
+  // Keep every failed fixture, including failures before the host assignment.
+  if (!cleaned && !host && primaryFailure === undefined) fs.rmSync(scratch, { recursive: true, force: true });
+}
+
 export async function checkGuildKit(archive, { runtimeArchive, claude, outputDirectory } = {}) {
   if (process.version !== 'v24.14.1' || !['linux', 'win32'].includes(process.platform)) fail('native Linux/Windows Node 24.14.1 required');
   archive = path.resolve(archive); runtimeArchive = path.resolve(runtimeArchive);
@@ -226,7 +242,7 @@ export async function checkGuildKit(archive, { runtimeArchive, claude, outputDir
   const windows = process.env.SystemRoot ?? process.env.SYSTEMROOT;
   const powershell = process.platform === 'win32' ? path.join(windows, 'System32/WindowsPowerShell/v1.0/powershell.exe') : undefined;
   const launcher = path.join(folder, process.platform === 'win32' ? 'grotesqueries.exe' : 'grotesqueries');
-  let host, child, peer, cleaned = false; const checks = ['runtime-files-unchanged', 'preset-integrity'];
+  let host, child, peer, primaryFailure, cleaned = false; const checks = ['runtime-files-unchanged', 'preset-integrity'];
   try {
     fixtureCLI(folder, tools, recordFile, environment, powershell);
     const options = { cwd: scratch, env: environment };
@@ -248,7 +264,7 @@ export async function checkGuildKit(archive, { runtimeArchive, claude, outputDir
       host = { pid: child.pid, stop: async () => { if (child.exitCode !== null || child.signalCode !== null) return; const exited = once(child, 'exit'); child.kill('SIGINT'); await bounded(exited, 15000, 'host shutdown timeout'); } };
     }
     const readyFile = path.join(folder, '.runtime/host-ready.json');
-    await until(() => { if (child && child.exitCode !== null) fail('host exited before readiness'); return fs.existsSync(readyFile); }, 'host readiness');
+    await until(() => { host.assertHealthy?.(); if (child && child.exitCode !== null) fail('host exited before readiness'); return fs.existsSync(readyFile); }, 'host readiness');
     const ready = JSON.parse(fs.readFileSync(readyFile)); if (ready.pid !== host.pid) fail('host identity mismatch');
     const origin = `http://127.0.0.1:${configuration.port}`, bootstrap = await fetch(origin + '/api/bootstrap').then(response => response.json());
     assert.deepEqual(bootstrap.sessions, []); if (fs.existsSync(recordFile)) fail('host startup started a CLI'); checks.push('zero-automatic-sessions');
@@ -276,8 +292,10 @@ export async function checkGuildKit(archive, { runtimeArchive, claude, outputDir
     await peer.request('stop', { sessionId, leaseId: lease });
     await peer.wait(() => peer.frames.some(frame => frame.type === 'session' && frame.session.id === sessionId && frame.session.processState === 'exited'), 'fixture cleanup');
     checks.push('launch-profile', 'explicit-start-and-control', 'native-profile-stop');
-    await peer.close(); peer = undefined; await host.stop(); host = undefined;
-    assert.equal(fs.existsSync(readyFile), false); checks.push('host-shutdown');
+    await peer.close(); peer = undefined; await host.stop();
+    assert.equal(fs.existsSync(readyFile), false);
+    await host.dispose?.(); host = undefined; checks.push('host-shutdown');
+    if (process.platform === 'win32') checks.push('controller-job-before-create', 'suspended-host-ack', 'controller-graceful-disposal');
     const workspace = path.join(scratch, 'hook-workspace'); fs.mkdirSync(workspace);
     const realClaude = claude ?? (process.platform === 'win32' ? 'claude.exe' : 'claude');
     // Remove the harmless fixture from lookup before invoking the real provider CLI or hooks.
@@ -296,10 +314,11 @@ export async function checkGuildKit(archive, { runtimeArchive, claude, outputDir
     if (fs.existsSync(reportFile)) { if (!regular(reportFile).equals(proof)) fail('existing qualification differs'); }
     else fs.writeFileSync(reportFile, proof, { flag: 'wx' });
     return { ...report, reportFile };
+  } catch (error) {
+    primaryFailure = error; throw error;
   } finally {
     if (peer) peer.socket.terminate();
-    await host?.stop();
-    if (!cleaned && !host) fs.rmSync(scratch, { recursive: true, force: true });
+    await finalizeGuildKitFixture(scratch, { host, cleaned, primaryFailure });
   }
 }
 

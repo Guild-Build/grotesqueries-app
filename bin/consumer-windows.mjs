@@ -11,6 +11,8 @@ import { fileURLToPath } from 'node:url';
 import { inflateRawSync, crc32 } from 'node:zlib';
 import WebSocket from 'ws';
 import { assertNoEmbeddedAuthenticode } from './windows-pe.mjs';
+import { startOwnedWindowsHost, probeWindowsPowerShell } from './windows-host-fixture.mjs';
+export { startOwnedWindowsHost } from './windows-host-fixture.mjs';
 
 const hash = bytes => crypto.createHash('sha256').update(bytes).digest('hex');
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
@@ -122,86 +124,9 @@ class Peer {
   }
 }
 
-// A dedicated console makes Ctrl+C affect only this owned test host. No shared console or machine setting changes.
-const consoleNative = String.raw`
-using System;
-using System.Runtime.InteropServices;
-using System.Text;
-public static class WindowsConsumerConsole {
-  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] public struct Startup {
-    public int cb; public string reserved, desktop, title;
-    public int x,y,width,height,charsX,charsY,fill,flags; public short show,reservedBytes;
-    public IntPtr reservedPointer,input,output,error;
-  }
-  [StructLayout(LayoutKind.Sequential)] public struct Created { public IntPtr process,thread; public uint pid,tid; }
-  [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
-  static extern bool CreateProcess(string application, StringBuilder command, IntPtr processSecurity, IntPtr threadSecurity,
-    bool inheritHandles, uint flags, IntPtr environment, string directory, ref Startup startup, out Created created);
-  [DllImport("kernel32.dll")] static extern bool CloseHandle(IntPtr handle);
-  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool FreeConsole();
-  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool AttachConsole(uint pid);
-  [DllImport("kernel32.dll", SetLastError=true)] public static extern bool GenerateConsoleCtrlEvent(uint eventCode,uint group);
-  [DllImport("kernel32.dll")] public static extern bool SetConsoleCtrlHandler(IntPtr handler,bool add);
-  public static uint Start(string executable,string directory) {
-    var startup=new Startup(); startup.cb=Marshal.SizeOf(typeof(Startup)); startup.flags=1; startup.show=0;
-    Created created;
-    if (!CreateProcess(executable,new StringBuilder("\""+executable+"\""),IntPtr.Zero,IntPtr.Zero,false,0x10,IntPtr.Zero,directory,ref startup,out created))
-      throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-    CloseHandle(created.thread); CloseHandle(created.process); return created.pid;
-  }
-}`;
 const quote = value => "'" + value.replaceAll("'", "''") + "'";
 const encoded = source => Buffer.from(source, 'utf16le').toString('base64');
-
-function runPowerShell(powershell, source, options) {
-  return execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded("$ErrorActionPreference='Stop';\n" + source)],
-    { ...options, windowsHide: true, encoding: 'utf8', timeout: 30000, maxBuffer: 1024 * 1024 }).trim().replace(/^\uFEFF/, '');
-}
-
-function sendCtrlC(powershell, executable, pid, birth, options) {
-  const source = `Add-Type -TypeDefinition ${quote(consoleNative)};\n` +
-    `$owned=[Diagnostics.Process]::GetProcessById(${pid}); try { $handle=$owned.Handle;\n` +
-    `if ($owned.HasExited -or $owned.StartTime.ToUniversalTime().Ticks.ToString() -ne ${quote(birth)} -or $owned.MainModule.FileName -ne ${quote(executable)}) { throw 'CONSUMER_HOST_IDENTITY_CHANGED' };\n` +
-    `[void][WindowsConsumerConsole]::FreeConsole(); if (![WindowsConsumerConsole]::AttachConsole(${pid})) { throw 'CONSUMER_ATTACH_FAILED' };\n` +
-    `try { [void][WindowsConsumerConsole]::SetConsoleCtrlHandler([IntPtr]::Zero,$true); if (![WindowsConsumerConsole]::GenerateConsoleCtrlEvent(0,0)) { throw 'CONSUMER_CTRL_C_FAILED' }; Start-Sleep -Milliseconds 300 }\n` +
-    `finally { [void][WindowsConsumerConsole]::FreeConsole() } } finally { $owned.Dispose() }`;
-  runPowerShell(powershell, source, options);
-}
-
 const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { if (error.code === 'ESRCH') return false; throw error; } };
-
-/** Shared qualification fixture: a hidden owned console with generation-bound, idempotent graceful shutdown. */
-export function startOwnedWindowsHost(executable, cwd, env) {
-  if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('WINDOWS_HOST_FIXTURE_UNSUPPORTED');
-  executable = path.resolve(executable); cwd = path.resolve(cwd);
-  if (!/^[A-Za-z]:[\\/]/.test(executable) || path.basename(executable).toLowerCase() !== 'grotesqueries.exe' ||
-    !fs.lstatSync(executable).isFile() || fs.lstatSync(executable).isSymbolicLink() || !fs.lstatSync(cwd).isDirectory()) throw new Error('WINDOWS_HOST_FIXTURE_INVALID');
-  const windows = Object.entries(env).find(([key]) => key.toUpperCase() === 'SYSTEMROOT')?.[1];
-  if (!/^[A-Za-z]:[\\/]/.test(windows ?? '')) throw new Error('WINDOWS_HOST_FIXTURE_SYSTEMROOT');
-  const powershell = path.join(windows, 'System32/WindowsPowerShell/v1.0/powershell.exe'), options = { cwd, env };
-  const identity = runPowerShell(powershell, `Add-Type -TypeDefinition ${quote(consoleNative)}; ` +
-    `$started=[WindowsConsumerConsole]::Start(${quote(executable)},${quote(cwd)}); $owned=[Diagnostics.Process]::GetProcessById($started); ` +
-    `try { '{0},{1}' -f $started,$owned.StartTime.ToUniversalTime().Ticks.ToString() } finally { $owned.Dispose() }`, options);
-  if (!/^[1-9][0-9]*,[0-9]+$/.test(identity)) throw new Error('WINDOWS_HOST_FIXTURE_IDENTITY');
-  const [rawPid, birth] = identity.split(','), pid = Number(rawPid);
-  if (!Number.isSafeInteger(pid) || pid > 0xffffffff) throw new Error('WINDOWS_HOST_FIXTURE_IDENTITY');
-  let stopping;
-  return { pid, birth, stop() {
-    if (stopping) return stopping;
-    const attempt = (async () => {
-      if (!alive(pid)) return;
-      sendCtrlC(powershell, executable, pid, birth, options);
-      const deadline = Date.now() + 30000;
-      while (alive(pid)) {
-        if (Date.now() >= deadline) throw new Error('WINDOWS_HOST_FIXTURE_SHUTDOWN_TIMEOUT');
-        await pause(25);
-      }
-    })();
-    stopping = attempt;
-    void attempt.catch(() => { if (stopping === attempt) stopping = undefined; });
-    return attempt;
-  } };
-}
 
 /** Finalize only the owned fixture, retaining every primary and recovery failure. */
 export async function cleanupWindowsConsumer(scratch, ownedHost, fixturePids, primaryFailure) {
@@ -210,6 +135,13 @@ export async function cleanupWindowsConsumer(scratch, ownedHost, fixturePids, pr
   catch (error) { cleanupErrors.push(error); }
   try { if (fixturePids.some(alive)) cleanupErrors.push(new Error('WINDOWS_CONSUMER_PROCESSES_REMAIN: Recorded fixture processes are still live.')); }
   catch (error) { cleanupErrors.push(error); }
+  try {
+    if (cleanupErrors.length) await ownedHost?.abort?.();
+    else await ownedHost?.dispose?.();
+  } catch (error) {
+    cleanupErrors.push(error);
+    try { await ownedHost?.abort?.(); } catch (recovery) { cleanupErrors.push(recovery); }
+  }
   if (primaryFailure !== undefined || cleanupErrors.length) {
     console.error('Windows consumer failure needs recovery; owned fixture preserved at ' + scratch);
     if (cleanupErrors.length) {
@@ -247,7 +179,7 @@ export async function checkWindowsArchive(archive) {
   const options = { cwd: caller, env: environment }, executable = path.join(folder, 'grotesqueries.exe');
   const until = async (predicate, description, milliseconds = 20000) => {
     const deadline = Date.now() + milliseconds;
-    while (!await predicate()) { if (Date.now() >= deadline) throw new Error('WINDOWS_CONSUMER_TIMEOUT: ' + description); await pause(25); }
+    while (!await predicate()) { ownedHost?.assertHealthy?.(); if (Date.now() >= deadline) throw new Error('WINDOWS_CONSUMER_TIMEOUT: ' + description); await pause(25); }
   };
   try {
     for (const entry of entries) fs.writeFileSync(path.join(folder, entry.name.slice(top.length + 1)), entry.bytes, { flag: 'wx' });
@@ -281,7 +213,8 @@ export async function checkWindowsArchive(archive) {
     const configuredBytes = fs.readFileSync(configFile);
     execFileSync(executable, ['--setup'], { ...options, windowsHide: true, timeout: 15000, stdio: 'pipe' });
     assert.deepEqual(fs.readFileSync(configFile), configuredBytes, 'Setup preserves configured profile bytes');
-    ownedHost = startOwnedWindowsHost(executable, caller, environment); pid = ownedHost.pid;
+    await probeWindowsPowerShell(caller, environment);
+    ownedHost = await startOwnedWindowsHost(executable, caller, environment); pid = ownedHost.pid;
     const readyFile = path.join(folder, '.runtime/host-ready.json');
     await until(() => { if (!alive(pid)) throw new Error('WINDOWS_CONSUMER_HOST_EXITED'); return fs.existsSync(readyFile); }, 'host ready');
     assert.equal(JSON.parse(fs.readFileSync(readyFile, 'utf8')).pid, pid);
@@ -375,6 +308,7 @@ export async function checkWindowsArchive(archive) {
     verifyWindowsFiles(folder, { configured: true });
     const diagnostics = fs.readdirSync(path.join(folder, '.runtime/logs')).map(file => fs.readFileSync(path.join(folder, '.runtime/logs', file), 'utf8')).join('\n');
     assert.match(diagnostics, /host-stop/); assert.doesNotMatch(diagnostics, /HOST_SHUTDOWN_FAILED/);
+    await ownedHost.dispose();
     const result = { consumerChecked: true, archive: path.basename(archive), archiveSha256, platform: process.platform, architecture: process.arch,
       kernel: os.release(), version: metadata.version, sourceRevision: metadata.sourceRevision, sourceDirty: metadata.sourceDirty,
       signing: metadata.signing, signingEvidence, nativeCleanup: metadata.nativeCleanup, runtime: 'embedded-node-' + metadata.node,
@@ -382,7 +316,8 @@ export async function checkWindowsArchive(archive) {
       checks: ['archive-checksum', 'contained-zip', 'file-checksums', 'no-embedded-authenticode', 'no-shipped-catalog', 'relocated-exe', 'system-only-path',
         'setup-no-spawn', 'setup-preservation', 'embedded-assets-and-licenses', 'origin-rejection', 'empty-startup', 'authenticated-native-pty',
         'observer-input-refusal', 'unicode-roundtrip', 'native-resize', 'disconnect-survival', 'observing-reconnect', 'retained-screen',
-        'natural-root-exit-retains-cleanup', 'root-exit-during-stop', 'detached-descendant-cleanup', 'sibling-survival', 'native-stop', 'real-console-ctrl-c', 'graceful-host-cleanup'] };
+        'natural-root-exit-retains-cleanup', 'root-exit-during-stop', 'detached-descendant-cleanup', 'sibling-survival', 'native-stop', 'real-console-ctrl-c', 'graceful-host-cleanup',
+        'controller-job-before-create', 'suspended-host-ack', 'controller-graceful-disposal'] };
     return result;
   } catch (error) {
     primaryFailure = error; throw error;

@@ -170,3 +170,31 @@ test('Windows consumer cleanup treats a permission-denied PID probe as unknown a
     fs.rmSync(folder, { recursive: true, force: true });
   }
 });
+
+test('Windows consumer requires controller disposal and reports containment as failed cleanup', async () => {
+  const temporary = path.join(process.cwd(), '.runtime/tmp'); fs.mkdirSync(temporary, { recursive: true });
+  const folder = fs.mkdtempSync(path.join(temporary, 'windows-controller-cleanup-'));
+  const calls = [];
+  try {
+    const failedDispose = new Error('OWNED_CONTROLLER_UNEXPECTED_EXIT');
+    await assert.rejects(cleanupWindowsConsumer(folder, { pid: process.pid,
+      stop: async () => { calls.push('stop'); },
+      dispose: async () => { calls.push('dispose'); throw failedDispose; },
+      abort: async () => { calls.push('abort'); } }, []), error => {
+      assert.ok(error instanceof AggregateError); assert.deepEqual(error.errors, [failedDispose]); return true;
+    });
+    assert.deepEqual(calls, ['stop', 'dispose', 'abort']); assert.equal(fs.existsSync(folder), true);
+    calls.length = 0;
+    const primary = new Error('OWNED_PRIMARY_FAILURE');
+    await assert.rejects(cleanupWindowsConsumer(folder, { pid: process.pid,
+      stop: async () => { calls.push('stop'); }, dispose: async () => { calls.push('dispose'); },
+      abort: async () => { calls.push('abort'); } }, [process.pid], primary), error => {
+      assert.ok(error instanceof AggregateError); assert.equal(error.errors[0], primary); return true;
+    });
+    assert.deepEqual(calls, ['stop', 'abort'], 'Known live fixture prevents normal disposal; containment cannot qualify');
+    calls.length = 0;
+    await cleanupWindowsConsumer(folder, { pid: process.pid, stop: async () => { calls.push('stop'); },
+      dispose: async () => { calls.push('dispose'); }, abort: async () => { calls.push('abort'); } }, []);
+    assert.deepEqual(calls, ['stop', 'dispose']); assert.equal(fs.existsSync(folder), false);
+  } finally { fs.rmSync(folder, { recursive: true, force: true }); }
+});

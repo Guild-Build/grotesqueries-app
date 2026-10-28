@@ -72,7 +72,11 @@ jobs:
         if: always()
         with:
           name: evidence-windows-package
-          path: .runtime/verification/windows-package.json
+          path: |
+            .runtime/verification/windows-package.json
+            .runtime/verification/windows-powershell-probes.json
+            .runtime/verification/windows-controller-*.json
+            .runtime/tmp/windows-package-fixture-*/**/windows-controller-*.json
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 1
@@ -109,7 +113,10 @@ jobs:
         if: always()
         with:
           name: evidence-windows-fresh-consumer
-          path: .runtime/verification/windows-consumer.json
+          path: |
+            .runtime/verification/windows-consumer.json
+            .runtime/verification/windows-powershell-probes.json
+            .runtime/verification/windows-controller-*.json
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 1
