@@ -5,11 +5,21 @@ import test from 'node:test';
 import { windowsProcessHelperEnvironment, getProcessSnapshot, stopProcessTree, type ProcessSnapshotRow, type ProcessTreeOwnership, type WindowsProcessCommand } from '../../app/services/process-tree.js';
 
 const execute = promisify(execFile);
-const root: ProcessSnapshotRow = { ProcessId: 91001, ParentProcessId: 1, CreationDate: '2026-10-27T20:00:00.000Z' };
-const child: ProcessSnapshotRow = { ProcessId: 91002, ParentProcessId: root.ProcessId, CreationDate: '2026-10-27T20:00:01.000Z' };
-const grandchild: ProcessSnapshotRow = { ProcessId: 91003, ParentProcessId: child.ProcessId, CreationDate: '2026-10-27T20:00:02.000Z' };
-const sibling: ProcessSnapshotRow = { ProcessId: 91004, ParentProcessId: 1, CreationDate: '2026-10-27T20:00:03.000Z' };
+const root: ProcessSnapshotRow = { ProcessId: 91001, ParentProcessId: 1, CreationDate: '2026-10-27T20:00:00.0000000Z' };
+const child: ProcessSnapshotRow = { ProcessId: 91002, ParentProcessId: root.ProcessId, CreationDate: '2026-10-27T20:00:01.0000000Z' };
+const grandchild: ProcessSnapshotRow = { ProcessId: 91003, ParentProcessId: child.ProcessId, CreationDate: '2026-10-27T20:00:02.0000000Z' };
+const sibling: ProcessSnapshotRow = { ProcessId: 91004, ParentProcessId: 1, CreationDate: '2026-10-27T20:00:03.0000000Z' };
 const ownership = (): ProcessTreeOwnership => ({ processes: new Map(), createdAfter: Date.parse(root.CreationDate) - 1, createdBefore: Date.parse(root.CreationDate) + 1 });
+// Lineage fixtures use normalized UTC; the provider wire format remains raw DMTF only.
+function snapshotJson(rows: unknown[]): string {
+  return JSON.stringify(rows.map(value => {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+    const row = value as Record<string, unknown>;
+    if (typeof row.CreationDate !== 'string') return row;
+    const match = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})\.(\d{7})Z$/.exec(row.CreationDate);
+    return match ? { ...row, CreationDate: match.slice(1, 7).join('') + '.' + match[7].slice(0, 6) + '+000' } : row;
+  }));
+}
 type DiagnosedError = Error & { code: string; diagnostics: Record<string, unknown>; cause: Error & { code: string | number | null } };
 const subprocess = (source: string): WindowsProcessCommand => (_phase, _script, options) =>
   execute(process.execPath, ['-e', source], { windowsHide: true, ...options });
@@ -18,10 +28,13 @@ test('Windows snapshot query projects only ownership properties and accepts a re
   const rows = [root, child, sibling];
   const runner: WindowsProcessCommand = async (phase, script, options) => {
     assert.equal(phase, 'snapshot');
-    assert.match(script, /Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate -ErrorAction Stop/);
+    assert.match(script, /Add-Type -AssemblyName System.Management/);
+    assert.match(script, /SELECT ProcessId,ParentProcessId,CreationDate FROM Win32_Process/);
+    assert.doesNotMatch(script, /CimCmdlets|Get-CimInstance|ManagementDateTimeConverter|ToUniversalTime|Set-ExecutionPolicy/);
+    assert.match(script, /\$item\.Dispose\(\)/); assert.match(script, /\$collection\.Dispose\(\)/); assert.match(script, /\$searcher\.Dispose\(\)/);
     assert.match(script, /\$ErrorActionPreference='Stop'/);
     assert.equal(options.timeout, 5000); assert.equal(options.maxBuffer, 1024 * 1024);
-    return subprocess('process.stdout.write(' + JSON.stringify(JSON.stringify(rows)) + ')')(phase, script, options);
+    return subprocess('process.stdout.write(' + JSON.stringify(snapshotJson(rows)) + ')')(phase, script, options);
   };
   assert.deepEqual(await getProcessSnapshot(5000, runner), rows);
 });
@@ -58,7 +71,7 @@ test('Windows snapshot command timeout and output-limit failures remain distinct
 });
 
 test('incomplete, malformed or ambiguous snapshots never signal a process or clear retained ownership', async () => {
-  for (const stdout of ['{', 'null', JSON.stringify([root, { ...child, CreationDate: null }]), JSON.stringify([root, root])]) {
+  for (const stdout of ['{', 'null', snapshotJson([root, { ...child, CreationDate: null }]), snapshotJson([root, root])]) {
     const retained: ProcessTreeOwnership = { ...ownership(), processes: new Map([[root.ProcessId, root.CreationDate]]) };
     let effects = 0;
     const runner: WindowsProcessCommand = async phase => {
@@ -74,7 +87,7 @@ test('Windows tree cleanup signals only complete validated lineage and verifies 
   const retained = ownership(); let snapshots = 0; const targets: number[] = [];
   const runner: WindowsProcessCommand = async (phase, source, options) => {
     assert.ok(options.timeout >= 1 && options.timeout <= 5000);
-    if (phase === 'snapshot') return { stdout: JSON.stringify(snapshots++ ? [sibling] : [grandchild, sibling, root, child]) };
+    if (phase === 'snapshot') return { stdout: snapshotJson(snapshots++ ? [sibling] : [grandchild, sibling, root, child]) };
     targets.push(...[...source.matchAll(/GetProcessById\((\d+)\)/g)].map(match => Number(match[1])));
     assert.match(source, /\$ownedHandle = \$ownedProcess.Handle/);
     assert.match(source, /StartTime.ToUniversalTime\(\)/);
@@ -88,7 +101,7 @@ test('Windows tree cleanup signals only complete validated lineage and verifies 
 test('failed tree signaling retains generations; retry never targets a reused root PID or its new children', async () => {
   const retained = ownership();
   await assert.rejects(stopProcessTree(root.ProcessId, retained, async phase => {
-    if (phase === 'snapshot') return { stdout: JSON.stringify([root, child]) };
+    if (phase === 'snapshot') return { stdout: snapshotJson([root, child]) };
     throw Object.assign(new Error('owned kill fixture failure'), { code: 23, killed: false, signal: null, stderr: 'owned-private-stderr' });
   }), error => {
     const failure = error as DiagnosedError; assert.equal(failure.code, 'STOP_TREE_FAILED'); assert.equal(failure.diagnostics.phase, 'stop');
@@ -96,11 +109,11 @@ test('failed tree signaling retains generations; retry never targets a reused ro
   });
   assert.deepEqual([...retained.processes], [[root.ProcessId, root.CreationDate], [child.ProcessId, child.CreationDate]]);
   let effects = 0;
-  const reused = { ...root, CreationDate: '2026-10-27T20:01:00.000Z' };
-  const replacementChild = { ProcessId: 91005, ParentProcessId: root.ProcessId, CreationDate: '2026-10-27T20:01:01.000Z' };
+  const reused = { ...root, CreationDate: '2026-10-27T20:01:00.0000000Z' };
+  const replacementChild = { ProcessId: 91005, ParentProcessId: root.ProcessId, CreationDate: '2026-10-27T20:01:01.0000000Z' };
   const verified = await stopProcessTree(root.ProcessId, retained, async phase => {
     if (phase === 'stop') effects++;
-    return { stdout: JSON.stringify([reused, replacementChild, sibling]) };
+    return { stdout: snapshotJson([reused, replacementChild, sibling]) };
   });
   assert.deepEqual(verified, [root.ProcessId, child.ProcessId]); assert.equal(effects, 0);
 });
@@ -111,7 +124,7 @@ test('a snapshot consuming the overall cleanup budget never initiates a stop com
   try {
     Date.now = () => now;
     await assert.rejects(stopProcessTree(root.ProcessId, retained, async phase => {
-      if (phase === 'snapshot') { now += 15000; return { stdout: JSON.stringify([root, child]) }; }
+      if (phase === 'snapshot') { now += 15000; return { stdout: snapshotJson([root, child]) }; }
       effects++; return { stdout: '' };
     }), /STOP_TREE_TIMEOUT/);
     assert.equal(effects, 0);
@@ -130,8 +143,8 @@ test('one typed snapshot timeout retries only the read, then signals after compl
       if (phase === 'snapshot') {
         snapshots++;
         if (snapshots === 1) { now += 5000; assert.equal(effects, 0); throw timedOut(); }
-        if (snapshots === 2) { assert.equal(effects, 0); return { stdout: JSON.stringify([root, child]) }; }
-        return { stdout: JSON.stringify([sibling]) };
+        if (snapshots === 2) { assert.equal(effects, 0); return { stdout: snapshotJson([root, child]) }; }
+        return { stdout: snapshotJson([sibling]) };
       }
       assert.equal(snapshots, 2); effects++; return { stdout: '' };
     });
@@ -172,7 +185,7 @@ test('invalid snapshots, command exits and output limits remain terminal without
     await assert.rejects(stopProcessTree(root.ProcessId, ownership(), async phase => {
       assert.equal(phase, 'snapshot'); snapshots++;
       if (failure) throw failure;
-      return { stdout: JSON.stringify([root, { ...child, CreationDate: null }]) };
+      return { stdout: snapshotJson([root, { ...child, CreationDate: null }]) };
     }), /STOP_METADATA_FAILED|STOP_SNAPSHOT_QUERY_FAILED/);
     assert.equal(snapshots, 1);
   }
@@ -183,14 +196,14 @@ test('the read retry allowance is shared across the whole Stop and never retries
   await assert.rejects(stopProcessTree(root.ProcessId, ownership(), async phase => {
     if (phase === 'snapshot') {
       snapshots++; if (snapshots === 1 || snapshots === 3) throw timedOut();
-      return { stdout: JSON.stringify([root]) };
+      return { stdout: snapshotJson([root]) };
     }
     effects++; return { stdout: '' };
   }), /STOP_SNAPSHOT_QUERY_FAILED/);
   assert.equal(snapshots, 3); assert.equal(effects, 1);
   snapshots = 0; effects = 0;
   await assert.rejects(stopProcessTree(root.ProcessId, ownership(), async phase => {
-    if (phase === 'snapshot') { snapshots++; return { stdout: JSON.stringify([root]) }; }
+    if (phase === 'snapshot') { snapshots++; return { stdout: snapshotJson([root]) }; }
     effects++; throw timedOut();
   }), /STOP_TREE_FAILED/);
   assert.equal(snapshots, 1); assert.equal(effects, 1);
@@ -207,4 +220,44 @@ test('private Windows process helper pins OS modules without mutating inherited 
     assert.equal(helper.PATH, parent.PATH); assert.equal(helper.OWNED_CLI_SETTING, parent.OWNED_CLI_SETTING);
   }
   assert.throws(() => windowsProcessHelperEnvironment({ SystemRoot: 'relative' }), /STOP_SYSTEMROOT_INVALID/);
+});
+
+
+test('raw Windows birth metadata normalizes offsets and microseconds independently of local DST', async () => {
+  const cases = [
+    ['20261101013000.123456-240', '2026-11-01T05:30:00.1234560Z'],
+    ['20261101013000.123456-300', '2026-11-01T06:30:00.1234560Z'],
+    ['20260101010000.000001+330', '2025-12-31T19:30:00.0000010Z'],
+    ['20261028120000.654321+999', '2026-10-27T19:21:00.6543210Z'],
+    ['20261028120000.654321-999', '2026-10-29T04:39:00.6543210Z'],
+    ['00010101000000.000001+000', '0001-01-01T00:00:00.0000010Z'],
+    ['00991231235959.999999-000', '0099-12-31T23:59:59.9999990Z'],
+    ['20240229000000.999999+000', '2024-02-29T00:00:00.9999990Z'],
+  ];
+  const originalTZ = process.env.TZ;
+  try {
+    for (const timezone of ['UTC', 'America/New_York', 'Asia/Kolkata']) {
+      process.env.TZ = timezone;
+      for (const [wire, expected] of cases) {
+        const rows = await getProcessSnapshot(5000, async () => ({ stdout: JSON.stringify({ ...root, CreationDate: wire }) }));
+        assert.equal(rows[0].CreationDate, expected, timezone + ' ' + wire);
+      }
+    }
+  } finally { if (originalTZ === undefined) delete process.env.TZ; else process.env.TZ = originalTZ; }
+});
+
+test('unknown or invalid DMTF births reject the complete snapshot before any signal or identity retention', async () => {
+  const invalid = [null, '', '20261028120000.000000+***', '2026**********.000000+000', '20261028120000.000000+1000',
+    '20261028120000.000000000', '20261028120000.00000+000', '20261028120000.000000+000\n', '２０２６1028120000.000000+000',
+    '00000101000000.000000+000', '20260229000000.000000+000', '20260431000000.000000+000', '20261301000000.000000+000',
+    '20260001000000.000000+000', '20260100235959.000000+000', '20260101240000.000000+000', '20260101006000.000000+000',
+    '20260101000060.000000+000', '00010101000000.000000+001', '99991231235959.999999-001', root.CreationDate];
+  for (const birth of invalid) {
+    const retained = ownership(); let signals = 0;
+    await assert.rejects(stopProcessTree(root.ProcessId, retained, async phase => {
+      if (phase === 'stop') signals++;
+      return { stdout: JSON.stringify([{ ...root, CreationDate: '20261027200000.000000+000' }, { ...child, CreationDate: birth }]) };
+    }), /STOP_METADATA_FAILED/);
+    assert.equal(signals, 0); assert.equal(retained.processes.size, 0, 'No row authorizes effects after a rejected snapshot');
+  }
 });

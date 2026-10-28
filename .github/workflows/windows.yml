@@ -33,9 +33,7 @@ jobs:
         if: always() && steps.native-tests.outcome == 'failure'
         with:
           name: evidence-windows-native-fixtures
-          path: |
-            .runtime/tmp/windows-native-*/case-report.json
-            .runtime/test/windows-snapshot-matrix.json
+          path: .runtime/tmp/windows-native-*/case-report.json
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 1

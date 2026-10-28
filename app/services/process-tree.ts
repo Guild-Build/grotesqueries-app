@@ -25,11 +25,41 @@ export function windowsProcessHelperEnvironment(parent: NodeJS.ProcessEnv): Node
   return { ...Object.fromEntries(Object.entries(parent).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH')),
     PSModulePath: path.win32.join(systemRoot, 'System32/WindowsPowerShell/v1.0/Modules') };
 }
-// Shared with read-only qualification controls; no script/row contents enter diagnostics.
-export const executeWindowsCommand: WindowsProcessCommand = (_phase, source, options) => execute(resolveExecutable(powershell),
+const executeWindowsCommand: WindowsProcessCommand = (_phase, source, options) => execute(resolveExecutable(powershell),
   ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', source], { windowsHide: true, ...options, env: windowsProcessHelperEnvironment(process.env) });
-const snapshotSource = "$ErrorActionPreference='Stop'; CimCmdlets\\Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate -ErrorAction Stop | " +
-  "Microsoft.PowerShell.Utility\\Select-Object ProcessId,ParentProcessId,@{n='CreationDate';e={$_.CreationDate.ToUniversalTime().ToString('o')}} | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress";
+// Query the same local Win32_Process provider without CimCmdlets module loading.
+// Birth strings remain raw until the strict UTC conversion below; no local/DST roundtrip.
+const snapshotSource = String.raw`$ErrorActionPreference='Stop'
+Microsoft.PowerShell.Utility\Add-Type -AssemblyName System.Management
+$searcher=[System.Management.ManagementObjectSearcher]::new('root\cimv2','SELECT ProcessId,ParentProcessId,CreationDate FROM Win32_Process')
+$collection=$null
+try {
+  $collection=$searcher.Get()
+  $rows=[Collections.Generic.List[object]]::new()
+  foreach($item in $collection) {
+    try {
+      [void]$rows.Add([pscustomobject]@{ProcessId=$item['ProcessId'];ParentProcessId=$item['ParentProcessId'];CreationDate=$item['CreationDate']})
+    } finally {$item.Dispose()}
+  }
+  $rows.ToArray() | Microsoft.PowerShell.Utility\ConvertTo-Json -Compress
+} finally {
+  try {if($null -ne $collection){$collection.Dispose()}} finally {$searcher.Dispose()}
+}`;
+function windowsBirthUtc(value: unknown): string | undefined {
+  if (typeof value !== 'string' || value.length !== 25) return undefined;
+  const match = /^([0-9]{4})([0-9]{2})([0-9]{2})([0-9]{2})([0-9]{2})([0-9]{2})\.([0-9]{6})([+-])([0-9]{3})$/.exec(value);
+  if (!match) return undefined;
+  const [year, month, day, hour, minute, second] = match.slice(1, 7).map(Number);
+  if (year < 1) return undefined;
+  const wall = new Date(0);
+  wall.setUTCFullYear(year, month - 1, day); wall.setUTCHours(hour, minute, second, 0);
+  if (wall.getUTCFullYear() !== year || wall.getUTCMonth() !== month - 1 || wall.getUTCDate() !== day ||
+    wall.getUTCHours() !== hour || wall.getUTCMinutes() !== minute || wall.getUTCSeconds() !== second) return undefined;
+  const offset = Number(match[9]) * (match[8] === '+' ? 1 : -1);
+  const utc = new Date(wall.getTime() - offset * 60000);
+  if (!Number.isFinite(utc.getTime()) || utc.getUTCFullYear() < 1 || utc.getUTCFullYear() > 9999) return undefined;
+  return utc.toISOString().slice(0, 19) + '.' + match[7] + '0Z';
+}
 function bytes(value: unknown): number { return typeof value === 'string' || Buffer.isBuffer(value) ? Buffer.byteLength(value) : 0; }
 async function runCommand(phase: 'snapshot' | 'stop', source: string, options: CommandOptions, executeCommand: WindowsProcessCommand) {
   const started = performance.now();
@@ -70,8 +100,10 @@ export async function getProcessSnapshot(timeoutMs: number, executeCommand: Wind
     if (Object.keys(item).length !== 3 || !['ProcessId', 'ParentProcessId', 'CreationDate'].every(key => Object.hasOwn(item, key)) ||
       !Number.isSafeInteger(item.ProcessId) || item.ProcessId < 0 || item.ProcessId > 0xffffffff || seen.has(item.ProcessId) ||
       !Number.isSafeInteger(item.ParentProcessId) || item.ParentProcessId < 0 || item.ParentProcessId > 0xffffffff ||
-      typeof item.CreationDate !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,7})?(?:Z|\+00:00)$/.test(item.CreationDate) ||
-      !Number.isFinite(Date.parse(item.CreationDate))) invalidSnapshot('invalid-row', stdout, stderr, elapsedMs, timeoutMs);
+      typeof item.CreationDate !== 'string') invalidSnapshot('invalid-row', stdout, stderr, elapsedMs, timeoutMs);
+    const birth = windowsBirthUtc(item.CreationDate);
+    if (birth === undefined) invalidSnapshot('invalid-row', stdout, stderr, elapsedMs, timeoutMs);
+    item.CreationDate = birth;
     seen.add(item.ProcessId);
   }
   return list as ProcessSnapshotRow[];
@@ -92,7 +124,7 @@ export async function stopProcessTree(ownedPid: number, ownership: ProcessTreeOw
     let list: ProcessSnapshotRow[];
     try { list = await getProcessSnapshot(Math.min(5000, Math.max(1, deadline - Date.now())), executeCommand); }
     catch (error) {
-      // A cold CIM query can consume its command budget. Retry that read once,
+      // A cold WMI query can consume its command budget. Retry that read once,
       // within the original overall deadline; no partial metadata authorizes effects.
       if (!snapshotRetried && error instanceof WindowsProcessCommandFailure && error.diagnostics.phase === 'snapshot' &&
         error.diagnostics.kind === 'timeout' && Date.now() < deadline) { snapshotRetried = true; continue; }
