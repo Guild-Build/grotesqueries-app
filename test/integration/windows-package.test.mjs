@@ -4,7 +4,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import test from 'node:test';
 import { windowsZip, stripAuthenticodeSignature, defaultWindowsConfiguration } from '../../bin/package-windows.mjs';
-import { cleanupWindowsConsumer, readWindowsZip, verifyUnsignedWindowsArchive, verifyWindowsFiles } from '../../bin/consumer-windows.mjs';
+import { assertWindowsHostShutdown, windowsHostLifecycle, cleanupWindowsConsumer, readWindowsZip, verifyUnsignedWindowsArchive, verifyWindowsFiles } from '../../bin/consumer-windows.mjs';
 import { assertNoEmbeddedAuthenticode, inspectWindowsPE } from '../../bin/windows-pe.mjs';
 import { seaConfig } from '../../bin/sea-config.mjs';
 import { frameAssets, FRAME_FILES } from '../../bin/frame-assets.mjs';
@@ -264,3 +264,30 @@ test('accepted input cannot conceal a prior or concurrent terminal protocol fail
   }, 'ready'), /OWNED_ASYNC_PARSER_FAILURE/);
   await later.screens.dispose();
 });
+
+test('Windows shutdown evidence exposes only fixed phase/code counts for the selected host', async () => fixture(folder => {
+  fs.mkdirSync(path.join(folder, '.runtime/logs'), { recursive: true });
+  const secret = 'owned-secret-never-uploaded';
+  fs.writeFileSync(path.join(folder, '.runtime/logs/host-0.log'), [
+    { event: 'host-signal', hostInstanceId: 'owned', code: 'SIGINT', payload: secret },
+    { event: 'host-stop-start', hostInstanceId: 'owned', token: secret },
+    { event: 'host-stop-http', hostInstanceId: 'other', code: 'IGNORE_OTHER' },
+    { event: secret, hostInstanceId: 'owned' },
+  ].map(value => JSON.stringify(value)).join('\n'));
+  const proof = windowsHostLifecycle(folder, 'owned');
+  assert.deepEqual(proof, { readyFilePresent: false, events: { 'host-signal': 1, 'host-stop-start': 1 }, codes: { SIGINT: 1 } });
+  assert.equal(JSON.stringify(proof).includes(secret), false); assert.equal(JSON.stringify(proof).includes('owned'), false);
+}));
+
+
+test('final shutdown proof excludes previous host instances and partial shutdown phase events', () => fixture(folder => {
+  const logs = path.join(folder, '.runtime/logs'); fs.mkdirSync(logs, { recursive: true });
+  const file = path.join(logs, 'host-0.log');
+  fs.writeFileSync(file, [{ hostInstanceId: 'previous', event: 'host-stop' },
+    { hostInstanceId: 'current', event: 'host-stop-start' }].map(row => JSON.stringify(row) + '\n').join(''));
+  assert.throws(() => assertWindowsHostShutdown(folder, 'current'), /current host must complete/);
+  fs.appendFileSync(file, JSON.stringify({ hostInstanceId: 'current', event: 'host-stop' }) + '\n');
+  assertWindowsHostShutdown(folder, 'current');
+  fs.appendFileSync(file, JSON.stringify({ hostInstanceId: 'current', event: 'pty-error', code: 'HOST_SHUTDOWN_FAILED' }) + '\n');
+  assert.throws(() => assertWindowsHostShutdown(folder, 'current'), /current host cleanup must succeed/);
+}));

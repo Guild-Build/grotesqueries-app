@@ -165,15 +165,18 @@ export function createHost(options: { config: Config; runtime: Runtime; assets: 
           plugins: plugins.summaries.map(plugin => plugin.name), refusals: options.ready.refusals });
     })(),
     close: (): Promise<void> => closing ??= (async () => {
+      log('host-stop-start');
       clearInterval(heartbeat); for (const view of [...views.values()]) view.close(1001, 'Host stopping');
       for (const socket of sockets.clients) socket.terminate(); control.dispose();
       let cleanupFailed = false;
-      try { await sessions.shutdown(); }
+      try { await sessions.shutdown(); log('host-stop-sessions'); }
       catch (error) { cleanupFailed = true; throw error; }
       finally {
         if (options.ready) removeReadyFile(options.ready.file, process.pid);
         await new Promise<void>(resolve => sockets.close(() => resolve()));
+        log('host-stop-websockets');
         await local.close();
+        log('host-stop-http');
         log('host-stop', cleanupFailed ? { code: 'HOST_SHUTDOWN_FAILED' } : {});
       }
     })(),

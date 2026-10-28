@@ -5,6 +5,7 @@ import { fork, spawn, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import test from 'node:test';
 import { NodePtyLauncher } from '../../app/services/node-pty.js';
+import { compileWindowsConsoleFixture, windowsConsoleFixtureCommand } from '../../bin/windows-console-fixture.mjs';
 import type { PtyHandle } from '../../app/services/pty.js';
 
 const skip = process.platform !== 'win32';
@@ -50,15 +51,15 @@ async function until(predicate: () => boolean, description: string): Promise<voi
   const deadline = Date.now() + observationBudgetMs;
   while (!predicate()) { if (Date.now() >= deadline) throw new Error('WINDOWS_NATIVE_TIMEOUT: ' + description); await new Promise(resolve => setTimeout(resolve, 20)); }
 }
-async function launch(source: string, directory: string, stopTree?: ConstructorParameters<typeof NodePtyLauncher>[2]): Promise<PtyHandle> {
+async function launch(source: string, directory: string, stopTree?: ConstructorParameters<typeof NodePtyLauncher>[2], custom?: { executable: string; args: string[] }): Promise<PtyHandle> {
   const native = path.join(directory, 'node_modules/node-pty'), installed = path.join(process.cwd(), 'node_modules/node-pty');
   fs.mkdirSync(path.join(native, 'prebuilds/win32-x64'), { recursive: true });
   fs.cpSync(path.join(installed, 'lib'), path.join(native, 'lib'), { recursive: true });
   for (const file of ['package.json', 'LICENSE', 'prebuilds/win32-x64/conpty.node', 'prebuilds/win32-x64/conpty_console_list.node']) {
     fs.copyFileSync(path.join(installed, file), path.join(native, file));
   }
-  return new NodePtyLauncher(directory, undefined, stopTree).start({ id: 'fixture', label: 'Windows fixture', executable: process.execPath,
-    args: ['-e', source], projectDirectory: directory, environment: {} }, 100, 30, path.basename(directory).replaceAll(' ', '-'));
+  return new NodePtyLauncher(directory, undefined, stopTree).start({ id: 'fixture', label: 'Windows fixture', executable: custom?.executable ?? process.execPath,
+    args: custom?.args ?? ['-e', source], projectDirectory: directory, environment: {} }, 100, 30, path.basename(directory).replaceAll(' ', '-'));
 }
 
 async function exercise(name: string, directory: string): Promise<CaseReport> {
@@ -103,6 +104,19 @@ async function exercise(name: string, directory: string): Promise<CaseReport> {
       let cleanup: boolean | undefined; pty.onExit((_code, remaining) => { cleanup = remaining; });
       await until(() => cleanup !== undefined, 'failed cleanup evidence'); assert.equal(cleanup, true);
       injectedFailure = false; assert.equal((await pty.stop()).exitCode, 5);
+    } else if (name === 'wide-console') {
+      const powershell = path.join(process.env.SystemRoot ?? process.env.SYSTEMROOT!, 'System32/WindowsPowerShell/v1.0/powershell.exe');
+      const library = compileWindowsConsoleFixture(directory, powershell, process.env), record = path.join(directory, 'wide-units.txt');
+      const command = windowsConsoleFixtureCommand(library, record);
+      pty = await launch('', directory, undefined, { executable: powershell, args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')] });
+      knownPids.push(pty.pid); let output = ''; pty.onOutput(data => { output += data; });
+      await until(() => output.includes('WINDOWS_READY:'), 'wide console readiness');
+      pty.write('ASCII-probe\r');
+      await until(() => fs.existsSync(record) && fs.readFileSync(record, 'utf8').trimEnd().split('\n').length === 1, 'ASCII wide console input');
+      pty.write('Unicode-λ界é\r');
+      await until(() => fs.readFileSync(record, 'utf8').trimEnd().split('\n').length === 2, 'Unicode wide console input');
+      assert.deepEqual(fs.readFileSync(record, 'utf8').trimEnd().split('\n'), ['ASCII-probe', 'Unicode-λ界é'].map(value => value.split('').map(char => char.charCodeAt(0)).join(',')));
+      await pty.stop();
     } else if (name === 'modules-absent' || name === 'modules-poisoned') {
       for (const key of Object.keys(process.env)) if (key.toUpperCase() === 'PSMODULEPATH') delete process.env[key];
       const expected = name === 'modules-poisoned' ? path.join(directory, 'missing-pwsh7-modules') : null;
@@ -205,6 +219,8 @@ if (worker) {
   });
   test('Windows natural root exit retains child/grandchild ownership and late exit subscribers until verified Stop', { skip, timeout: workerBudgetMs + 5000 },
     () => isolated('natural-exit', fixtureDirectory()));
+  test('Windows native ReadConsoleW witness receives exact ASCII and Unicode UTF16 input', { skip, timeout: workerBudgetMs + 5000 },
+    () => isolated('wide-console', fixtureDirectory()));
   for (const name of ['modules-absent', 'modules-poisoned']) test('Windows private cleanup helper preserves siblings and CLI environment with ' + name,
     { skip, timeout: workerBudgetMs + 5000 }, () => isolated(name, fixtureDirectory()));
   test('Windows failed Stop remains retryable after primary exit and does not clear cleanup evidence', { skip, timeout: workerBudgetMs + 5000 },

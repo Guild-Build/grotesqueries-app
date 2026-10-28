@@ -76,6 +76,7 @@ jobs:
             .runtime/verification/windows-package.json
             .runtime/verification/windows-powershell-probes.json
             .runtime/verification/windows-terminal-fixture.json
+            .runtime/verification/windows-host-lifecycle.json
             .runtime/verification/windows-controller-*.json
             .runtime/tmp/windows-package-fixture-*/**/windows-controller-*.json
           include-hidden-files: true
@@ -118,6 +119,7 @@ jobs:
             .runtime/verification/windows-consumer.json
             .runtime/verification/windows-powershell-probes.json
             .runtime/verification/windows-terminal-fixture.json
+            .runtime/verification/windows-host-lifecycle.json
             .runtime/verification/windows-controller-*.json
           include-hidden-files: true
           if-no-files-found: warn

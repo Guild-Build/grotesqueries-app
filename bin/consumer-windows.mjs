@@ -12,6 +12,7 @@ import { inflateRawSync, crc32 } from 'node:zlib';
 import WebSocket from 'ws';
 import Headless from '@xterm/headless';
 import Unicode11 from '@xterm/addon-unicode11';
+import { compileWindowsConsoleFixture, windowsConsoleFixtureCommand } from './windows-console-fixture.mjs';
 import { assertNoEmbeddedAuthenticode } from './windows-pe.mjs';
 import { startOwnedWindowsHost, probeWindowsPowerShell } from './windows-host-fixture.mjs';
 export { startOwnedWindowsHost } from './windows-host-fixture.mjs';
@@ -213,6 +214,30 @@ export async function cleanupWindowsConsumer(scratch, ownedHost, fixturePids, pr
   catch (error) { throw new Error('WINDOWS_CONSUMER_REMOVE_FAILED: Passed process checks; fixture preserved at ' + scratch, { cause: error }); }
 }
 
+/** Whitelisted lifecycle metadata only; never copy logs, IDs, payloads or native error text. */
+export function windowsHostLifecycle(folder, hostInstanceId) {
+  const allowed = new Set(['host-start', 'host-signal', 'host-stop-start', 'host-stop-sessions', 'host-stop-websockets', 'host-stop-http', 'host-stop', 'pty-error']);
+  const events = {}, codes = {}; const directory = path.join(folder, '.runtime/logs');
+  if (hostInstanceId && fs.existsSync(directory)) for (const name of fs.readdirSync(directory).filter(name => /^host-\d+\.log$/.test(name)).slice(0, 100)) {
+    const file = path.join(directory, name), stat = fs.lstatSync(file);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size > 1024 * 1024) continue;
+    for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+      let entry; try { entry = JSON.parse(line); } catch { continue; }
+      if (entry.hostInstanceId !== hostInstanceId || !allowed.has(entry.event)) continue;
+      events[entry.event] = (events[entry.event] ?? 0) + 1;
+      if (typeof entry.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(entry.code)) codes[entry.code] = (codes[entry.code] ?? 0) + 1;
+    }
+  }
+  return { readyFilePresent: fs.existsSync(path.join(folder, '.runtime/host-ready.json')), events, codes };
+}
+
+export function assertWindowsHostShutdown(folder, hostInstanceId) {
+  const lifecycle = windowsHostLifecycle(folder, hostInstanceId);
+  assert.equal(lifecycle.events['host-stop'], 1, 'The current host must complete its terminal shutdown event');
+  assert.equal(lifecycle.codes.HOST_SHUTDOWN_FAILED ?? 0, 0, 'The current host cleanup must succeed');
+  return lifecycle;
+}
+
 /** Downloaded archive plus this bundled checker are the only inputs; test installations are always newly extracted. */
 export async function checkWindowsArchive(archive) {
   if (process.platform !== 'win32' || process.arch !== 'x64' || process.version !== 'v24.14.1') throw new Error('WINDOWS_X64_NODE_24_14_1_REQUIRED');
@@ -226,7 +251,7 @@ export async function checkWindowsArchive(archive) {
   const folder = path.join(scratch, top), caller = path.join(scratch, 'different-cwd'), temp = path.join(scratch, 'temp');
   fs.mkdirSync(folder); fs.mkdirSync(caller); fs.mkdirSync(temp);
   const receivedFile = path.join(folder, 'consumer-received-code-units.txt');
-  let pid, ownedHost, peer, fixtureSessionId, fixturePhase = 'startup', primaryFailure; const fixturePids = [];
+  let pid, ownedHost, peer, fixtureSessionId, activeHostInstanceId, fixturePhase = 'startup', primaryFailure; const fixturePids = [];
   const windows = process.env.SystemRoot ?? process.env.SYSTEMROOT;
   assert.match(windows ?? '', /^[A-Za-z]:[\\/]/);
   const powershell = path.join(windows, 'System32/WindowsPowerShell/v1.0/powershell.exe');
@@ -255,12 +280,8 @@ export async function checkWindowsArchive(archive) {
     assert.ok(config.launchProfiles.length > 0 && config.launchProfiles.every(profile => profile.projectDirectory === '.'));
     const server = net.createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening');
     config.port = server.address().port; await new Promise(resolve => server.close(resolve));
-    const script = `[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::InputEncoding=[Text.UTF8Encoding]::new($false); ` +
-      `[Console]::WriteLine('WINDOWS_READY:'+$PID); while ($null -ne ($line=[Console]::ReadLine())) { ` +
-      `$units=[Text.StringBuilder]::new(); for($i=0;$i -lt $line.Length;$i++){ if($i){[void]$units.Append(',')}; [void]$units.Append([int][char]$line[$i]) }; ` +
-      `[IO.File]::AppendAllText(${quote(receivedFile)},$units.ToString()+[Environment]::NewLine); ` +
-      `if ($line -eq 'grid') { [Console]::WriteLine('WINDOWS_GRID:'+ [Console]::WindowWidth +'x'+ [Console]::WindowHeight) } ` +
-      `else { [Console]::WriteLine('WINDOWS_ECHO:'+$line) } }`;
+    const fixtureLibrary = compileWindowsConsoleFixture(caller, powershell, environment);
+    const script = windowsConsoleFixtureCommand(fixtureLibrary, receivedFile);
     const profile = (id, source) => ({ id, label: id, executable: powershell,
       args: ['-NoLogo', '-NoProfile', '-EncodedCommand', encoded(source)], projectDirectory: '.', environment: { PSModulePath: path.join(path.dirname(powershell), 'Modules') } });
     const pidFile = path.join(folder, 'consumer-tree-pids.txt'), exitFile = path.join(folder, 'consumer-root-exit.txt');
@@ -276,17 +297,27 @@ export async function checkWindowsArchive(archive) {
     execFileSync(executable, ['--setup'], { ...options, windowsHide: true, timeout: 15000, stdio: 'pipe' });
     assert.deepEqual(fs.readFileSync(configFile), configuredBytes, 'Setup preserves configured profile bytes');
     await probeWindowsPowerShell(caller, environment);
-    ownedHost = await startOwnedWindowsHost(executable, caller, environment); pid = ownedHost.pid;
     const readyFile = path.join(folder, '.runtime/host-ready.json');
-    await until(() => { if (!alive(pid)) throw new Error('WINDOWS_CONSUMER_HOST_EXITED'); return fs.existsSync(readyFile); }, 'host ready');
+    ownedHost = await startOwnedWindowsHost(executable, caller, environment); pid = ownedHost.pid;
+    fixturePhase = 'empty-host';
+    await until(() => fs.existsSync(readyFile), 'empty host ready');
     assert.equal(JSON.parse(fs.readFileSync(readyFile, 'utf8')).pid, pid);
+    const empty = await fetch(`http://127.0.0.1:${config.port}/api/bootstrap`).then(response => response.json());
+    activeHostInstanceId = empty.hostInstanceId; assert.deepEqual(empty.sessions, [], 'The Ctrl+C control runs before any PTY session');
+    await ownedHost.stop();
+    assert.equal(fs.existsSync(readyFile), false, 'Empty packaged host removes readiness after real Ctrl+C');
+    await ownedHost.dispose(); ownedHost = undefined; activeHostInstanceId = undefined; fixturePhase = 'startup';
+    ownedHost = await startOwnedWindowsHost(executable, caller, environment); pid = ownedHost.pid;
+    await until(() => { if (!alive(pid)) throw new Error('WINDOWS_CONSUMER_HOST_EXITED'); return fs.existsSync(readyFile); }, 'host ready');
+    const actualReady = JSON.parse(fs.readFileSync(readyFile, 'utf8'));
+    assert.equal(actualReady.pid, pid); activeHostInstanceId = actualReady.hostInstanceId;
     const origin = `http://127.0.0.1:${config.port}`, bootstrap = () => fetch(origin + '/api/bootstrap').then(response => response.json());
     for (const route of ['/', '/assets/app.js', '/assets/app.css', '/licenses', '/grotesqueries.schema.json', '/version.json']) {
       assert.equal((await fetch(origin + route)).status, 200, route);
     }
     assert.match(await fetch(origin + '/licenses').then(response => response.text()), /Copyright Node\.js contributors/);
     assert.equal((await fetch(origin + '/api/bootstrap', { headers: { Origin: 'https://example.invalid' } })).status, 403);
-    const initial = await bootstrap(); assert.deepEqual(initial.sessions, []);
+    const initial = await bootstrap(); activeHostInstanceId = initial.hostInstanceId; assert.deepEqual(initial.sessions, []);
     const connect = async () => {
       const connected = new WindowsConsumerPeer(new WebSocket(`ws://127.0.0.1:${config.port}/api/terminal?token=${initial.token}`, { origin }));
       await connected.until(() => connected.frames.some(frame => frame.type === 'hello'), 'hello');
@@ -332,6 +363,7 @@ export async function checkWindowsArchive(archive) {
     const siblingOutput = peer.output.length; await attach(peer, sibling.session.id);
     await peer.until(() => /WINDOWS_READY:\d+/.test(peer.output.slice(siblingOutput)), 'sibling readiness');
     const siblingPid = Number(/WINDOWS_READY:(\d+)/.exec(peer.output.slice(siblingOutput))[1]); fixturePids.push(siblingPid);
+    fixturePhase = 'natural-root-exit';
     const naturalTree = await peer.result(peer.request('start', { profileId: 'consumer-tree', cols: 100, rows: 30 }), 'start-result');
     await attach(peer, naturalTree.session.id);
     await until(() => fs.existsSync(pidFile) && fs.readFileSync(pidFile, 'utf8').trim().split(/\r?\n/).length === 3, 'natural-exit descendants');
@@ -347,6 +379,7 @@ export async function checkWindowsArchive(archive) {
     await until(() => naturalPids.every(value => !alive(value)), 'natural root-exit descendants stopped');
     assert.ok(alive(siblingPid) && alive(rootPid));
     fs.unlinkSync(pidFile); fs.unlinkSync(exitFile);
+    fixturePhase = 'root-exit-during-stop';
     const treeStart = await peer.result(peer.request('start', { profileId: 'consumer-tree', cols: 100, rows: 30 }), 'start-result');
     await attach(peer, treeStart.session.id);
     await peer.until(() => peer.output.includes('WINDOWS_TREE_READY'), 'tree root ready');
@@ -368,16 +401,17 @@ export async function checkWindowsArchive(archive) {
     assert.equal(afterTree.sessions.find(session => session.id === treeStart.session.id).exitCode, 7);
     assert.equal(afterTree.sessions.find(session => session.id === sibling.session.id).processState, 'running');
     assert.ok(alive(rootPid));
+    fixturePhase = 'native-stop';
     await attach(peer, id); lease = await control(peer, id);
     await peer.result(peer.request('stop', { sessionId: id, leaseId: lease }), 'operation-result', 30000);
     await until(() => !alive(rootPid), 'native Stop');
     await peer.close(); peer = undefined;
+    fixturePhase = 'host-shutdown';
     await ownedHost.stop();
     assert.equal(fs.existsSync(readyFile), false, 'Graceful shutdown removes the owned ready file');
     assert.ok(fixturePids.every(value => !alive(value)), 'All recorded fixture processes exited');
     verifyWindowsFiles(folder, { configured: true });
-    const diagnostics = fs.readdirSync(path.join(folder, '.runtime/logs')).map(file => fs.readFileSync(path.join(folder, '.runtime/logs', file), 'utf8')).join('\n');
-    assert.match(diagnostics, /host-stop/); assert.doesNotMatch(diagnostics, /HOST_SHUTDOWN_FAILED/);
+    assertWindowsHostShutdown(folder, activeHostInstanceId);
     await ownedHost.dispose();
     const result = { consumerChecked: true, archive: path.basename(archive), archiveSha256, platform: process.platform, architecture: process.arch,
       kernel: os.release(), version: metadata.version, sourceRevision: metadata.sourceRevision, sourceDirty: metadata.sourceDirty,
@@ -406,7 +440,15 @@ export async function checkWindowsArchive(archive) {
     peer?.socket.terminate();
     try { await peer?.screens.dispose(); }
     catch (error) { primaryFailure = new AggregateError([...(primaryFailure === undefined ? [] : [primaryFailure]), error], 'WINDOWS_FIXTURE_SCREEN_CLEANUP_FAILED'); }
-    await cleanupWindowsConsumer(scratch, ownedHost, fixturePids, primaryFailure);
+    try { await cleanupWindowsConsumer(scratch, ownedHost, fixturePids, primaryFailure); }
+    catch (error) {
+      const report = path.join(process.cwd(), '.runtime/verification/windows-host-lifecycle.json');
+      try {
+        fs.mkdirSync(path.dirname(report), { recursive: true });
+        fs.writeFileSync(report, JSON.stringify({ phase: fixturePhase, ...windowsHostLifecycle(folder, activeHostInstanceId) }, null, 2) + '\n');
+      } catch { throw new AggregateError([error, new Error('WINDOWS_LIFECYCLE_DIAGNOSTIC_FAILED')], 'WINDOWS_CONSUMER_FAILED'); }
+      throw error;
+    }
   }
 }
 

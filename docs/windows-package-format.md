@@ -78,6 +78,15 @@ controlled Stop, natural primary exit, detached child/grandchild cleanup, siblin
 isolation, and real Ctrl+C shutdown in a dedicated hidden console. Reports are
 separate from build metadata; a built archive alone is not qualification.
 
+The controlled Unicode witness reads and writes through
+[ReadConsoleW/WriteConsoleW](https://learn.microsoft.com/en-us/windows/console/readconsole)
+and still checks exact received UTF-16 values and rendered text. This avoids the
+known [.NET UTF-8 console byte-read issue](https://github.com/dotnet/runtime/issues/43295),
+which can replace non-ASCII input with NULs. The checker first verifies real Ctrl+C
+on an empty packaged host, then repeats shutdown after PTY use. Failed checks
+retain fixed lifecycle event/code counts; terminal evidence covers only the owned
+fixture, never operator sessions or raw host logs.
+
 The SEA and frame helpers adapt the reviewed Grotesqueries implementation at
 `792e0ee2641525c61e496f863b634976e8f0b419`. Private operator configuration,
 internal history and local evidence are excluded.

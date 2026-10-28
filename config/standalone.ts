@@ -39,15 +39,20 @@ export async function runSea(probe?: (context: { runtime: Runtime; config: Confi
   const assets = embeddedAssets(Object.fromEntries(['licenses.txt', 'grotesqueries.schema.json', 'version.json', ...frameFiles]
     .map(name => [name, new Uint8Array(getAsset(`web/${name}`))])), config.frame);
   const diagnostics = new DiagnosticLogger(root, config.diagnostics);
+  const hostInstanceId = crypto.randomUUID();
   const host = composeHost({ config, runtime, assets, engine: () => createHost({ config, runtime, assets,
     sessions: new SessionRegistry({ config, launcher: new NodePtyLauncher(root, payload), diagnostics }),
     settings: new HostSettings(runtime.configFile, runtime.root, config.port), guildBuild: guild.state,
-    diagnostics, hostInstanceId: crypto.randomUUID(),
+    diagnostics, hostInstanceId,
     token: crypto.randomBytes(32).toString('base64url'),
     ...(config.fleet?.coordinator ? {} : { ready: { file: readyFilePath(runtime.root), refusals: [] } }) }) });
   if (!probe) {
-    const stop = () => { void host.close().catch(() => { console.error('HOST_SHUTDOWN_FAILED'); process.exitCode = 1; }); };
-    process.once('SIGINT', stop); process.once('SIGTERM', stop);
+    const stop = (signal: 'SIGINT' | 'SIGTERM') => {
+      try { diagnostics.log('host-signal', { hostInstanceId, code: signal }); }
+      catch { console.error('DIAGNOSTICS_WRITE_FAILED'); }
+      void host.close().catch(() => { console.error('HOST_SHUTDOWN_FAILED'); process.exitCode = 1; });
+    };
+    process.once('SIGINT', () => stop('SIGINT')); process.once('SIGTERM', () => stop('SIGTERM'));
   }
   await host.listen();
   console.log(JSON.stringify({ ready: true, url: host.origin, sessions: 0 }));
