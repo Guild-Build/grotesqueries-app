@@ -14,6 +14,7 @@ import { readyFilePath } from '../app/helpers/ready.js';
 import { configureInstallation } from '../app/services/setup.js';
 import { HostSettings } from '../app/services/settings.js';
 import { composeHost } from './composition.js';
+import { loadGuildBuild } from '../app/services/guild-build.js';
 
 export async function runSea(probe?: (context: { runtime: Runtime; config: Config; payload: string;
   origin: string }) => Promise<void>): Promise<void> {
@@ -30,26 +31,32 @@ export async function runSea(probe?: (context: { runtime: Runtime; config: Confi
   const temporary = managedDirectory(runtime.root, runtime.temporary);
   process.env.TEMP = process.env.TMP = temporary;
   process.env.TMPDIR = posixWindowsPath(temporary);
-  const config = loadConfig(runtime.configFile, runtime.root);
+  const guild = loadGuildBuild(runtime.root, loadConfig(runtime.configFile, runtime.root));
+  const config = guild.config;
   const payload = extractNativePayload(root, manifest, name => new Uint8Array(getAsset(`native/${name}`)));
   // Requirement 4.2.2: the frame's files when the EXE was packaged with them; a `frame` beside the EXE wins over them.
   const frameFiles = Object.values(frameRoutes).map(({ file }) => file).filter(file => getAssetKeys().includes(`web/${file}`));
   const assets = embeddedAssets(Object.fromEntries(['licenses.txt', 'grotesqueries.schema.json', 'version.json', ...frameFiles]
     .map(name => [name, new Uint8Array(getAsset(`web/${name}`))])), config.frame);
   const diagnostics = new DiagnosticLogger(root, config.diagnostics);
+  const hostInstanceId = crypto.randomUUID();
   const host = composeHost({ config, runtime, assets, engine: () => createHost({ config, runtime, assets,
     sessions: new SessionRegistry({ config, launcher: new NodePtyLauncher(root, payload), diagnostics }),
-    settings: new HostSettings(runtime.configFile, runtime.root, config.port),
-    diagnostics, hostInstanceId: crypto.randomUUID(),
+    settings: new HostSettings(runtime.configFile, runtime.root, config.port), guildBuild: guild.state,
+    diagnostics, hostInstanceId,
     token: crypto.randomBytes(32).toString('base64url'),
     ...(config.fleet?.coordinator ? {} : { ready: { file: readyFilePath(runtime.root), refusals: [] } }) }) });
+  if (!probe) {
+    const stop = (signal: 'SIGINT' | 'SIGTERM') => {
+      try { diagnostics.log('host-signal', { hostInstanceId, code: signal }); }
+      catch { console.error('DIAGNOSTICS_WRITE_FAILED'); }
+      void host.close().catch(() => { console.error('HOST_SHUTDOWN_FAILED'); process.exitCode = 1; });
+    };
+    process.once('SIGINT', () => stop('SIGINT')); process.once('SIGTERM', () => stop('SIGTERM'));
+  }
   await host.listen();
   console.log(JSON.stringify({ ready: true, url: host.origin, sessions: 0 }));
   if (probe) { try { await probe({ runtime, config, payload, origin: host.origin }); } finally { await host.close(); } }
-  else {
-    const stop = () => { void host.close().catch(() => { console.error('HOST_SHUTDOWN_FAILED'); process.exitCode = 1; }); };
-    process.once('SIGINT', stop); process.once('SIGTERM', stop);
-  }
 }
 
 // A separate probe entry invokes runSea with its own explicit fixture runner.

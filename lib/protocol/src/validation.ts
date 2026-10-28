@@ -1,4 +1,4 @@
-import { DEFAULT_LIMITS, PLUGIN_CONTRACT_VERSION, type Bootstrap, type ClientMessage, type EffectiveLimits, type PluginManifest,
+import { DEFAULT_LIMITS, GUILD_BUILD_SLUGS, PLUGIN_CONTRACT_VERSION, type Bootstrap, type ClientMessage, type EffectiveLimits, type GuildBuildSummary, type PluginManifest,
   type ServerMessage } from './index.ts';
 
 type ObjectValue = Record<string, unknown>;
@@ -204,6 +204,21 @@ export function decodeBootstrap(value: unknown): Bootstrap {
   });
   list(message.plugins, 64, plugin);
   return message as unknown as Bootstrap;
+}
+
+export function decodeGuildBuild(value: unknown): { guildBuild: GuildBuildSummary | null } {
+  const document = object(value, ['guildBuild']);
+  if (document.guildBuild === null) return { guildBuild: null };
+  const item = object(document.guildBuild, ['slug', 'name', 'version', 'target', 'modules', 'catalogRevision', 'profileId', 'prerequisites']);
+  choice(item.slug, GUILD_BUILD_SLUGS); choice(item.target, ['claude-code']);
+  text(item.name, 256, 1); text(item.version, 128, 1);
+  if (typeof item.version !== 'string' || !/^\d+\.\d+\.\d+(?:-[a-zA-Z0-9.-]+)?$/.test(item.version) ||
+    typeof item.catalogRevision !== 'string' || !/^[a-f0-9]{40}$/.test(item.catalogRevision)) invalid('build identity');
+  list(item.modules, 64, value => { if (typeof value !== 'string' || value.length > 128 || !/^(skill|agent|hook|mcp|playbook|tool)\/[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value)) invalid('build component'); });
+  list(item.prerequisites, 8, value => text(value, 512, 1));
+  if (item.profileId !== null && item.profileId !== `guild-${item.slug}`) invalid('build profile');
+  if (item.profileId !== null && (item.prerequisites as unknown[]).length !== 0) invalid('build readiness');
+  return document as unknown as { guildBuild: GuildBuildSummary };
 }
 
 /** Shape only. The core still resolves and contains every executable, directory and folder before loading. */

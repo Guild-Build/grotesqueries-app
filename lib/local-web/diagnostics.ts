@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { sanitizeNativeStopFailure } from './native-command-diagnostics.mjs';
 import { assertManagedPath, managedDirectory } from './runtime.js';
 
 /** Lifecycle metadata only. Native error text, request and terminal payloads never enter logs. */
@@ -24,6 +25,8 @@ export class DiagnosticLogger {
     }
     if (typeof fields.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(fields.code)) entry.code = fields.code;
     if (Number.isSafeInteger(fields.exitCode)) entry.exitCode = fields.exitCode;
+    const nativeFailure = sanitizeNativeStopFailure(fields.nativeFailure);
+    if (nativeFailure) entry.nativeFailure = nativeFailure;
     const line = JSON.stringify(entry) + '\n';
     if (Buffer.byteLength(line) > this.settings.maxFileBytes) throw this.failure();
     try {

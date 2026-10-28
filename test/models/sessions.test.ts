@@ -1,5 +1,11 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+import { getProcessSnapshot } from '../../app/services/process-tree.js';
+import { DiagnosticLogger } from '../../app/services/diagnostics.js';
+import { scratchDirectory } from '../support/scratch.js';
 import { SessionRegistry } from '../../app/models/sessions.js';
 import { FakeLauncher, fixtureConfig } from '../support/helpers.js';
 
@@ -292,4 +298,72 @@ test('a bridge-failed job that then times out keeps one failure code', async () 
   assert.equal(record.jobEnd, 'JOB_TIMEOUT'); assert.equal(registry.find(summary.id)!.processState, 'exited');
   assert.deepEqual([...new Set(codes)], ['TERMINAL_BRIDGE_FAILED']);
   await registry.shutdown();
+});
+
+test('failed Stop preserves bounded command diagnostics and host context without changing retry behavior', async () => {
+  const launcher = new FakeLauncher(), records: Array<{ event: string; fields: Record<string, unknown> }> = [];
+  let throwing = false;
+  const registry = new SessionRegistry({ config: fixtureConfig(), launcher, diagnostics: { log(event, fields = {}) {
+    records.push({ event, fields }); if (throwing) throw new Error('OWNED_DIAGNOSTIC_FAILURE');
+  } } });
+  registry.bindDiagnosticHost('current-host'); registry.bindDiagnosticHost('current-host');
+  assert.throws(() => registry.bindDiagnosticHost('different-host'), /SESSION_HOST_ALREADY_BOUND/);
+  const session = await registry.start('powershell', 80, 24), handle = launcher.handles[0], original = handle.stop.bind(handle);
+  const privateMarker = 'owned-private-message-cause-output';
+  const diagnostics = { phase: 'snapshot', kind: 'timeout', elapsedMs: 5001, timeoutMs: 5000, code: null, signal: 'SIGTERM', killed: true, stdoutBytes: 0, stderrBytes: 11 };
+  handle.stop = async () => { throw Object.assign(new Error('STOP_SNAPSHOT_QUERY_FAILED: ' + privateMarker, { cause: new Error(privateMarker) }),
+    { code: 'STOP_SNAPSHOT_QUERY_FAILED', diagnostics, stdout: privateMarker, stderr: privateMarker }); };
+  throwing = true;
+  await assert.rejects(registry.stop(session.id), /STOP_SNAPSHOT_QUERY_FAILED/);
+  assert.equal(registry.find(session.id)!.failureCode, 'STOP_FAILED'); assert.equal(registry.require(session.id).cleanupRequired, true);
+  const failure = [...records].reverse().find(record => record.event === 'pty-error')!;
+  assert.equal(failure.fields.hostInstanceId, 'current-host');
+  assert.deepEqual(failure.fields.nativeFailure, { code: 'STOP_SNAPSHOT_QUERY_FAILED', command: diagnostics });
+  assert.equal(JSON.stringify(failure).includes(privateMarker), false);
+  throwing = false; handle.stop = original; await registry.stop(session.id); await registry.shutdown();
+  assert.equal(registry.require(session.id).cleanupRequired, false);
+});
+
+
+test('diagnostic writer persists only allowlisted native cleanup metadata', () => {
+  const root = scratchDirectory('native-diagnostic-writer-');
+  const logger = new DiagnosticLogger(root, { directory: path.join(root, 'logs'), maxFiles: 2, maxFileBytes: 4096 });
+  const privateMarker = 'owned-private-message-cause-source-output';
+  const command = { phase: 'snapshot', kind: 'invalid-json', elapsedMs: 123, timeoutMs: 5000, code: 0, signal: null, killed: false, stdoutBytes: 40, stderrBytes: 0 };
+  const valid = { code: 'STOP_METADATA_FAILED', command };
+  logger.log('pty-error', { code: 'STOP_FAILED', nativeFailure: valid, message: privateMarker, cause: privateMarker, stdout: privateMarker });
+  for (const invalid of [{ ...valid, cause: privateMarker }, { ...valid, command: { ...command, stdout: privateMarker } },
+    { ...valid, command: { ...command, elapsedMs: NaN } }, { ...valid, command: { ...command, stderrBytes: Number.MAX_SAFE_INTEGER } },
+    { code: privateMarker }]) logger.log('pty-error', { code: 'STOP_FAILED', nativeFailure: invalid });
+  const text = fs.readFileSync(path.join(root, 'logs/host-0.log'), 'utf8'), rows = text.trimEnd().split('\n').map(line => JSON.parse(line));
+  assert.deepEqual(rows[0].nativeFailure, valid); assert.ok(rows.slice(1).every(row => row.nativeFailure === undefined));
+  assert.equal(text.includes(privateMarker), false);
+});
+
+
+test('injected snapshot timeout and invalid JSON reach the current host safe failure report', async () => {
+  const moduleURL = pathToFileURL(path.join(process.cwd(), 'bin/consumer-windows.mjs')).href;
+  const { windowsHostLifecycle } = await import(moduleURL);
+  for (const kind of ['timeout', 'invalid-json']) {
+    const root = scratchDirectory('native-failure-report-'), logs = path.join(root, '.runtime/logs');
+    const diagnostics = new DiagnosticLogger(root, { directory: logs, maxFiles: 2, maxFileBytes: 4096 });
+    const launcher = new FakeLauncher(), registry = new SessionRegistry({ config: fixtureConfig(), launcher, diagnostics });
+    registry.bindDiagnosticHost('current-host');
+    const session = await registry.start('powershell', 80, 24), handle = launcher.handles[0], original = handle.stop.bind(handle);
+    const privateMarker = 'owned-private-command-output-cause';
+    handle.stop = async () => {
+      await getProcessSnapshot(5000, async () => {
+        if (kind === 'timeout') throw Object.assign(new Error(privateMarker), { code: null, signal: 'SIGTERM', killed: true, stdout: privateMarker, stderr: privateMarker });
+        return { stdout: '{', stderr: privateMarker };
+      });
+      return original();
+    };
+    await assert.rejects(registry.stop(session.id));
+    const report = windowsHostLifecycle(root, 'current-host');
+    assert.equal(report.nativeFailures.length, 1); assert.equal(report.nativeFailures[0].command.kind, kind);
+    assert.equal(report.nativeFailures[0].code, kind === 'timeout' ? 'STOP_SNAPSHOT_QUERY_FAILED' : 'STOP_METADATA_FAILED');
+    assert.equal(windowsHostLifecycle(root, 'other-host').nativeFailures, undefined);
+    assert.equal(JSON.stringify(report).includes(privateMarker), false);
+    handle.stop = original; await registry.stop(session.id); await registry.shutdown();
+  }
 });

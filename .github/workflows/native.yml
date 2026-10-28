@@ -13,7 +13,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, macos-15-intel]
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
@@ -33,6 +33,24 @@ jobs:
       - name: Clean Linux runtime filesystems
         if: runner.os == 'Linux'
         run: node bin/check-clean-linux.mjs dist/posix/*.tar.gz
+      - name: Install pinned CLI for plugin checks without model calls
+        if: runner.os == 'Linux'
+        run: npm install --prefix .runtime/provider-cli --no-package-lock --ignore-scripts @anthropic-ai/claude-code@2.1.310
+      - name: Assemble and qualify complete Guild builds
+        if: runner.os == 'Linux'
+        run: node bin/qualify-guild-kits.mjs dist/posix/*.tar.gz .runtime/provider-cli
+      # Kits are deterministic: retain their proofs and reconstruct locally from
+      # the exact base artifact, checking the final hash before publication.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: runner.os == 'Linux' && always()
+        with:
+          name: guild-kit-proof-${{ runner.arch }}
+          path: |
+            dist/guild-kits/*.assembly.json
+            dist/guild-kits/*.qualification.json
+            dist/guild-kits/*.sha256
+          if-no-files-found: error
+          retention-days: 1
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: unsigned-candidate-${{ matrix.os }}
@@ -40,13 +58,13 @@ jobs:
             dist/posix/*.tar.gz
             dist/posix/*.sha256
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1
           compression-level: 0
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         if: runner.os == 'Linux' && always()
         with:
-          name: evidence-linux-x64
+          name: evidence-linux-${{ runner.arch }}
           path: .runtime/verification/clean-linux/*.json
           include-hidden-files: true
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 1

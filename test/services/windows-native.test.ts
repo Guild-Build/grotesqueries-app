@@ -1,0 +1,272 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fork, spawn, spawnSync, type ChildProcess } from 'node:child_process';
+import { once } from 'node:events';
+import test from 'node:test';
+import { posixWindowsPath } from '../../app/helpers/runtime.js';
+import { NodePtyLauncher } from '../../app/services/node-pty.js';
+import { compileWindowsConsoleFixture, windowsConsoleFixtureCommand } from '../../bin/windows-console-fixture.mjs';
+import type { PtyHandle } from '../../app/services/pty.js';
+
+const skip = process.platform !== 'win32';
+const observationBudgetMs = 15000, stopAndDrainBudgetMs = 15000 + 5000;
+// Four bounded observations plus body/finally Stop attempts and native startup.
+const workerBudgetMs = 7000 + 4 * observationBudgetMs + 2 * stopAndDrainBudgetMs;
+const alive = (pid: number): boolean => {
+  try { process.kill(pid, 0); return true; }
+  catch (error) { if ((error as NodeJS.ErrnoException).code === 'ESRCH') return false; throw error; }
+};
+type DiagnosticValue = string | number | boolean | null;
+type ErrorRecord = { message: string; stack?: string; code?: string | number | null; signal?: string | null; killed?: boolean;
+  stdoutBytes?: number; stderrBytes?: number; diagnostics?: Record<string, DiagnosticValue>; cause?: ErrorRecord };
+type CaseReport = { name: string; passed: boolean; cleanupVerified: boolean; knownPids: number[];
+  primary?: ErrorRecord; cleanupErrors: ErrorRecord[] };
+function recordError(error: unknown, depth = 0): ErrorRecord {
+  const record: ErrorRecord = error instanceof Error
+    ? { message: error.message.slice(0, 4096), stack: error.stack?.slice(0, 8192) } : { message: String(error).slice(0, 4096) };
+  if (!error || typeof error !== 'object') return record;
+  const fields = error as Record<string, unknown>;
+  if (fields.code === null || typeof fields.code === 'number' || typeof fields.code === 'string') record.code = typeof fields.code === 'string' ? fields.code.slice(0, 128) : fields.code;
+  if (fields.signal === null || typeof fields.signal === 'string') record.signal = fields.signal;
+  if (typeof fields.killed === 'boolean') record.killed = fields.killed;
+  for (const name of ['stdout', 'stderr'] as const) {
+    const value = fields[name], size = fields[name + 'Bytes'];
+    if (typeof value === 'string' || Buffer.isBuffer(value)) record[name + 'Bytes' as 'stdoutBytes' | 'stderrBytes'] = Buffer.byteLength(value);
+    else if (typeof size === 'number' && Number.isSafeInteger(size) && size >= 0) record[name + 'Bytes' as 'stdoutBytes' | 'stderrBytes'] = size;
+  }
+  if (fields.diagnostics && typeof fields.diagnostics === 'object') {
+    const diagnostics: Record<string, DiagnosticValue> = {};
+    for (const key of ['phase', 'kind', 'elapsedMs', 'timeoutMs', 'code', 'signal', 'killed', 'stdoutBytes', 'stderrBytes']) {
+      const value = (fields.diagnostics as Record<string, unknown>)[key];
+      if (value === null || typeof value === 'boolean' || typeof value === 'number' && Number.isFinite(value) || typeof value === 'string' && value.length <= 128) diagnostics[key] = value as DiagnosticValue;
+    }
+    record.diagnostics = diagnostics;
+  }
+  if (fields.cause !== undefined && depth < 3) record.cause = recordError(fields.cause, depth + 1);
+  return record;
+}
+const restoredError = ({ message, stack, cause, ...metadata }: ErrorRecord): Error => Object.assign(
+  new Error(message, cause ? { cause: restoredError(cause) } : undefined), { stack, ...metadata });
+async function until(predicate: () => boolean, description: string): Promise<void> {
+  const deadline = Date.now() + observationBudgetMs;
+  while (!predicate()) { if (Date.now() >= deadline) throw new Error('WINDOWS_NATIVE_TIMEOUT: ' + description); await new Promise(resolve => setTimeout(resolve, 20)); }
+}
+async function launch(source: string, directory: string, stopTree?: ConstructorParameters<typeof NodePtyLauncher>[2], custom?: { executable: string; args: string[] }): Promise<PtyHandle> {
+  const native = path.join(directory, 'node_modules/node-pty'), installed = path.join(process.cwd(), 'node_modules/node-pty');
+  fs.mkdirSync(path.join(native, 'prebuilds/win32-x64'), { recursive: true });
+  fs.cpSync(path.join(installed, 'lib'), path.join(native, 'lib'), { recursive: true });
+  for (const file of ['package.json', 'LICENSE', 'prebuilds/win32-x64/conpty.node', 'prebuilds/win32-x64/conpty_console_list.node']) {
+    fs.copyFileSync(path.join(installed, file), path.join(native, file));
+  }
+  return new NodePtyLauncher(directory, undefined, stopTree).start({ id: 'fixture', label: 'Windows fixture', executable: custom?.executable ?? process.execPath,
+    args: custom?.args ?? ['-e', source], projectDirectory: directory, environment: {} }, 100, 30, path.basename(directory).replaceAll(' ', '-'));
+}
+
+async function exercise(name: string, directory: string): Promise<CaseReport> {
+  let pty: PtyHandle | undefined, sibling: ChildProcess | undefined, siblingExited: Promise<unknown> | undefined;
+  let primary: ErrorRecord | undefined, cleanupVerified = false, injectedFailure = false;
+  const cleanupErrors: ErrorRecord[] = [], knownPids: number[] = [];
+  const originalModules = Object.entries(process.env).filter(([key]) => key.toUpperCase() === 'PSMODULEPATH');
+  try {
+    if (name === 'natural-exit' || name === 'minimal-app-environment') {
+      const grandchild = 'setInterval(()=>{},1000)';
+      const child = `const child=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(grandchild)}],{detached:true,windowsHide:true,stdio:'ignore'});process.send({child:process.pid,grandchild:child.pid});setInterval(()=>{},1000)`;
+      const source = `const child=require('node:child_process').spawn(process.execPath,['-e',${JSON.stringify(child)}],{detached:true,windowsHide:true,stdio:['ignore','ignore','ignore','ipc']});child.on('message',value=>console.log('TREE:'+JSON.stringify(value)));process.stdin.setRawMode(true);process.stdin.on('data',()=>{console.log('WINDOWS_ROOT_FINAL');process.exit(7)});setInterval(()=>{},1000)`;
+      pty = await launch(source, directory); knownPids.push(pty.pid);
+      sibling = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { windowsHide: true, stdio: 'ignore' });
+      siblingExited = once(sibling, 'exit'); void siblingExited.catch(() => {});
+      if (sibling.pid) knownPids.push(sibling.pid);
+      let output = '', code: number | undefined, cleanup: boolean | undefined;
+      pty.onOutput(data => { output += data; }); pty.onExit((value, remaining) => { code = value; cleanup = remaining; });
+      await until(() => /TREE:\{[^\r\n]+\}/.test(output), 'native descendants');
+      const descendants = JSON.parse(/TREE:(\{[^\r\n]+\})/.exec(output)![1]) as { child: number; grandchild: number };
+      knownPids.push(descendants.child, descendants.grandchild);
+      assert.ok(alive(descendants.child) && alive(descendants.grandchild));
+      pty.write('x'); await until(() => code !== undefined, 'natural primary exit');
+      assert.equal(code, 7); assert.equal(cleanup, true); assert.ok(output.includes('WINDOWS_ROOT_FINAL'));
+      assert.equal(pty.cleanupScope, 'tracked-descendants');
+      let lateCleanup: boolean | undefined; pty.onExit((_value, remaining) => { lateCleanup = remaining; });
+      await until(() => lateCleanup !== undefined, 'late exit subscriber'); assert.equal(lateCleanup, true);
+      const stopped = await pty.stop(); assert.equal(stopped.exitCode, 7); assert.equal(stopped.cleanupScope, 'tracked-descendants');
+      for (const pid of [descendants.child, descendants.grandchild]) { assert.ok(stopped.verifiedPids.includes(pid)); assert.equal(alive(pid), false); }
+      assert.ok(alive(sibling.pid!));
+      let verified: boolean | undefined; pty.onExit((_value, remaining) => { verified = remaining; });
+      await until(() => verified !== undefined, 'verified late exit subscriber'); assert.equal(verified, false);
+    } else if (name === 'failed-stop') {
+      const { stopProcessTree } = await import('../../app/services/process-tree.js');
+      injectedFailure = true;
+      pty = await launch("console.log('WINDOWS_READY');process.stdin.setRawMode(true);process.stdin.on('data',()=>process.exit(5));setInterval(()=>{},1000)", directory,
+        async (pid, ownership) => { if (injectedFailure) throw new Error('OWNED_TEST_METADATA_FAILED'); return stopProcessTree(pid, ownership); });
+      knownPids.push(pty.pid);
+      let output = '', exited = false; pty.onOutput(data => { output += data; }); pty.onExit(() => { exited = true; });
+      await until(() => output.includes('WINDOWS_READY'), 'ready'); pty.write('x'); await until(() => exited, 'primary exit');
+      await assert.rejects(pty.stop(), /OWNED_TEST_METADATA_FAILED/);
+      let cleanup: boolean | undefined; pty.onExit((_code, remaining) => { cleanup = remaining; });
+      await until(() => cleanup !== undefined, 'failed cleanup evidence'); assert.equal(cleanup, true);
+      injectedFailure = false; assert.equal((await pty.stop()).exitCode, 5);
+    } else if (name === 'wide-console') {
+      const powershell = path.join(process.env.SystemRoot ?? process.env.SYSTEMROOT!, 'System32/WindowsPowerShell/v1.0/powershell.exe');
+      const library = compileWindowsConsoleFixture(directory, powershell, process.env), record = path.join(directory, 'wide-units.txt');
+      const command = windowsConsoleFixtureCommand(library, record);
+      pty = await launch('', directory, undefined, { executable: powershell, args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')] });
+      knownPids.push(pty.pid); let output = ''; pty.onOutput(data => { output += data; });
+      await until(() => output.includes('WINDOWS_READY:'), 'wide console readiness');
+      pty.write('ASCII-probe\r');
+      await until(() => fs.existsSync(record) && fs.readFileSync(record, 'utf8').trimEnd().split('\n').length === 1, 'ASCII wide console input');
+      pty.write('Unicode-λ界é\r');
+      await until(() => fs.readFileSync(record, 'utf8').trimEnd().split('\n').length === 2, 'Unicode wide console input');
+      assert.deepEqual(fs.readFileSync(record, 'utf8').trimEnd().split('\n'), ['ASCII-probe', 'Unicode-λ界é'].map(value => value.split('').map(char => char.charCodeAt(0)).join(',')));
+      await pty.stop();
+    } else if (name === 'modules-absent' || name === 'modules-poisoned') {
+      for (const key of Object.keys(process.env)) if (key.toUpperCase() === 'PSMODULEPATH') delete process.env[key];
+      const expected = name === 'modules-poisoned' ? path.join(directory, 'missing-pwsh7-modules') : null;
+      if (expected !== null) process.env.PsModulePath = expected;
+      const source = "console.log('MODULES_UNCHANGED:'+((process.env.PSModulePath??null)===" + JSON.stringify(expected) + "?'yes':'no'));setInterval(()=>{},1000)";
+      pty = await launch(source, directory);
+      knownPids.push(pty.pid); let output = ''; pty.onOutput(data => { output += data; });
+      sibling = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { windowsHide: true, stdio: 'ignore' });
+      siblingExited = once(sibling, 'exit'); void siblingExited.catch(() => {}); if (sibling.pid) knownPids.push(sibling.pid);
+      await until(() => output.includes('MODULES_UNCHANGED:yes'), 'unchanged CLI module environment');
+      const stopped = await pty.stop(); assert.ok(stopped.verifiedPids.includes(pty.pid));
+      assert.equal(alive(pty.pid), false); assert.ok(alive(sibling.pid!));
+      assert.equal(process.env.PSModulePath ?? null, expected, 'Private helper must not mutate host or CLI environment');
+    } else throw new Error('WINDOWS_NATIVE_CASE_INVALID');
+  } catch (error) { primary = recordError(error); }
+  finally {
+    injectedFailure = false;
+    if (pty) {
+      try { await pty.stop(); cleanupVerified = true; }
+      catch (error) { cleanupErrors.push(recordError(error)); }
+    }
+    if (sibling) {
+      try { if (sibling.exitCode === null && sibling.signalCode === null) sibling.kill(); await siblingExited; }
+      catch (error) { cleanupErrors.push(recordError(error)); cleanupVerified = false; }
+    }
+  }
+  for (const key of Object.keys(process.env)) if (key.toUpperCase() === 'PSMODULEPATH') delete process.env[key];
+  for (const [key, value] of originalModules) process.env[key] = value;
+  return { name, passed: !primary && !cleanupErrors.length && cleanupVerified, cleanupVerified, knownPids, primary, cleanupErrors };
+}
+
+/** Node/libuv restores some missing Windows identity variables during process creation.
+ * Normalize only this isolated control before any application/runtime module imports. */
+function exactEnvironmentPreload(directory: string, names: string[]): string {
+  const file = path.join(directory, 'exact-environment-preload.cjs');
+  const expected = [...new Set(names.map(name => name.toUpperCase()))].sort();
+  fs.writeFileSync(file, `const expected=${JSON.stringify(expected)};const allowed=new Set(expected);
+` +
+    `for(const name of Object.keys(process.env))if(!allowed.has(name.toUpperCase()))delete process.env[name];
+` +
+    `const actual=Object.keys(process.env).map(name=>name.toUpperCase()).sort();
+` +
+    `if(actual.length!==expected.length||actual.some((name,index)=>name!==expected[index]))throw Error('WINDOWS_NATIVE_EXACT_ENV_KEYS');
+`, { flag: 'wx' });
+  return file;
+}
+
+function minimalAppEnvironment(directory: string): NodeJS.ProcessEnv {
+  const windows = process.env.SystemRoot ?? process.env.SYSTEMROOT!;
+  const powershell = path.join(windows, 'System32/WindowsPowerShell/v1.0/powershell.exe');
+  const temporary = path.join(directory, '.runtime/tmp'); fs.mkdirSync(temporary, { recursive: true });
+  const environment: NodeJS.ProcessEnv = { PATH: [path.join(windows, 'System32'), path.dirname(powershell)].join(';'), NODE_PATH: '', NODE_OPTIONS: '',
+    WS_NO_BUFFER_UTIL: '1', WS_NO_UTF_8_VALIDATE: '1', TEMP: temporary, TMP: temporary, TMPDIR: posixWindowsPath(temporary) };
+  for (const name of ['SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE', 'COMSPEC', 'PATHEXT', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+    'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMDATA', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS']) {
+    const value = Object.entries(process.env).find(([key]) => key.toUpperCase() === name)?.[1]; if (value !== undefined) environment[name] = value;
+  }
+  return environment;
+}
+/** Native addons remain mapped until their loading process exits. Only the parent removes that process's fixture. */
+async function isolated(name: string, directory: string): Promise<void> {
+  let environment: NodeJS.ProcessEnv = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
+  if (name === 'minimal-app-environment') environment = minimalAppEnvironment(directory);
+  const execArgv = name === 'minimal-app-environment' ? ['--require', exactEnvironmentPreload(directory, Object.keys(environment))] : [];
+  const child = fork(__filename, ['--windows-native-worker', name, directory], {
+    execArgv, env: environment, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true,
+  });
+  let report: CaseReport | undefined, output = '', errors = '', timedOut = false;
+  child.stdout?.on('data', data => { output = (output + data).slice(-65536); });
+  child.stderr?.on('data', data => { errors = (errors + data).slice(-65536); });
+  child.on('message', value => { if (value && typeof value === 'object' && (value as CaseReport).name === name) report = value as CaseReport; });
+  const timer = setTimeout(() => { timedOut = true; child.kill(); }, workerBudgetMs);
+  let code: number | null;
+  try { [code] = await once(child, 'exit') as [number | null]; }
+  finally { clearTimeout(timer); }
+  if (timedOut || code !== 0 || !report?.passed || !report.cleanupVerified) {
+    const failures: Error[] = [];
+    if (report?.primary) failures.push(restoredError(report.primary));
+    failures.push(...(report?.cleanupErrors ?? []).map(restoredError));
+    if (!failures.length) failures.push(new Error((timedOut ? 'WINDOWS_NATIVE_WORKER_TIMEOUT' : 'WINDOWS_NATIVE_WORKER_FAILED') + `: exit ${code}; ${output}${errors}`));
+    throw new AggregateError(failures, 'Windows native fixture failed; evidence preserved at ' + directory, { cause: failures[0] });
+  }
+  try { fs.rmSync(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); }
+  catch (error) { throw new Error('WINDOWS_NATIVE_FIXTURE_REMOVE_FAILED: Passed native checks; fixture preserved at ' + directory, { cause: error }); }
+}
+function fixtureDirectory(): string {
+  const temporary = path.join(process.cwd(), '.runtime/tmp'); fs.mkdirSync(temporary, { recursive: true });
+  return fs.mkdtempSync(path.join(temporary, 'windows-native-'));
+}
+
+const worker = process.argv[2] === '--windows-native-worker';
+if (worker) {
+  const name = process.argv[3], directory = process.argv[4];
+  if (!directory || !path.isAbsolute(directory) || path.dirname(directory) !== path.join(process.cwd(), '.runtime/tmp') || !path.basename(directory).startsWith('windows-native-')) {
+    throw new Error('WINDOWS_NATIVE_WORKER_DIRECTORY');
+  }
+  void (async () => {
+    const report: CaseReport = name === 'harness-pass'
+      ? { name, passed: true, cleanupVerified: true, knownPids: [], cleanupErrors: [] }
+      : name === 'harness-errors'
+        ? { name, passed: false, cleanupVerified: false, knownPids: [], primary: recordError(Object.assign(
+          new Error('OWNED_PRIMARY_FIXTURE_FAILURE', { cause: Object.assign(new Error('OWNED_COMMAND_FAILURE'),
+            { code: 23, signal: null, killed: false, stdout: 'owned-private-stdout', stderr: 'owned-private-stderr' }) }),
+          { code: 'STOP_SNAPSHOT_QUERY_FAILED', diagnostics: { phase: 'snapshot', kind: 'exit', elapsedMs: 12, timeoutMs: 5000,
+            code: 23, signal: null, killed: false, stdoutBytes: 20, stderrBytes: 20 } })), cleanupErrors: [{ message: 'OWNED_CLEANUP_FIXTURE_FAILURE' }] }
+        : await exercise(name, directory);
+    fs.writeFileSync(path.join(directory, 'case-report.json'), JSON.stringify(report, null, 2) + '\n');
+    if (typeof process.send !== 'function') throw new Error('WINDOWS_NATIVE_WORKER_IPC');
+    process.send(report, () => process.exit(report.passed ? 0 : 1));
+  })().catch(error => { console.error(error); process.exit(1); });
+} else {
+  test('Windows native fixture isolation removes files after worker exit and preserves both failure causes', async () => {
+    const passed = fixtureDirectory(); await isolated('harness-pass', passed); assert.equal(fs.existsSync(passed), false);
+    const failed = fixtureDirectory();
+    try {
+      await assert.rejects(isolated('harness-errors', failed), error => {
+        assert.ok(error instanceof AggregateError);
+        assert.deepEqual(error.errors.map(value => (value as Error).message), ['OWNED_PRIMARY_FIXTURE_FAILURE', 'OWNED_CLEANUP_FIXTURE_FAILURE']);
+        const primary = error.errors[0] as Error & ErrorRecord;
+        assert.equal(primary.code, 'STOP_SNAPSHOT_QUERY_FAILED'); assert.equal(primary.diagnostics?.phase, 'snapshot');
+        assert.equal(primary.diagnostics?.timeoutMs, 5000); assert.equal(primary.cause?.code, 23);
+        assert.equal(primary.cause?.signal, null); assert.equal(primary.cause?.killed, false);
+        assert.equal(primary.cause?.stdoutBytes, Buffer.byteLength('owned-private-stdout'));
+        assert.equal(primary.cause?.stderrBytes, Buffer.byteLength('owned-private-stderr'));
+        assert.equal(JSON.stringify(primary).includes('owned-private-'), false);
+        return true;
+      });
+      assert.equal(JSON.parse(fs.readFileSync(path.join(failed, 'case-report.json'), 'utf8')).cleanupVerified, false);
+    } finally { fs.rmSync(failed, { recursive: true, force: true }); }
+  });
+  test('isolated environment preload removes restored keys before application imports without logging values', () => {
+    const directory = fixtureDirectory();
+    try {
+      const preload = exactEnvironmentPreload(directory, ['OWNED_EXPECTED']);
+      const child = spawnSync(process.execPath, ['--require', preload, '-e',
+        "require('node:assert/strict').deepEqual(Object.keys(process.env),['OWNED_EXPECTED']);if(process.env.OWNED_EXPECTED!=='kept')process.exit(23)"],
+        { env: { OWNED_EXPECTED: 'kept', OWNED_RESTORED: 'owned-private-marker' }, windowsHide: true, encoding: 'utf8', timeout: 5000 });
+      assert.equal(child.status, 0, child.stderr); assert.equal(child.stdout, '');
+      assert.equal(fs.readFileSync(preload, 'utf8').includes('owned-private-marker'), false);
+    } finally { fs.rmSync(directory, { recursive: true, force: true }); }
+  });
+  test('Windows natural-exit cleanup and sibling isolation use the exact minimal SEA app environment', { skip, timeout: workerBudgetMs + 5000 },
+    () => isolated('minimal-app-environment', fixtureDirectory()));
+  test('Windows natural root exit retains child/grandchild ownership and late exit subscribers until verified Stop', { skip, timeout: workerBudgetMs + 5000 },
+    () => isolated('natural-exit', fixtureDirectory()));
+  test('Windows native ReadConsoleW witness receives exact ASCII and Unicode UTF16 input', { skip, timeout: workerBudgetMs + 5000 },
+    () => isolated('wide-console', fixtureDirectory()));
+  for (const name of ['modules-absent', 'modules-poisoned']) test('Windows private cleanup helper preserves siblings and CLI environment with ' + name,
+    { skip, timeout: workerBudgetMs + 5000 }, () => isolated(name, fixtureDirectory()));
+  test('Windows failed Stop remains retryable after primary exit and does not clear cleanup evidence', { skip, timeout: workerBudgetMs + 5000 },
+    () => isolated('failed-stop', fixtureDirectory()));
+}

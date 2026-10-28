@@ -1,7 +1,7 @@
 import crypto from 'node:crypto';
 import { WebSocketServer } from 'ws';
 import { createLocalServer, jsonResponse as json } from '../../lib/local-web/server.js';
-import { PROTOCOL_VERSION, type Bootstrap, type EffectiveLimits } from '@grotesqueries/protocol';
+import { PROTOCOL_VERSION, type Bootstrap, type EffectiveLimits, type GuildBuildSummary, type SettingsDocument } from '@grotesqueries/protocol';
 import type { Config } from '../../config/application.js';
 import type { Runtime } from '../helpers/runtime.js';
 import type { AssetSource } from '../helpers/assets.js';
@@ -13,14 +13,18 @@ import { ControlLeases } from './control.js';
 import { InputDelivery } from './input.js';
 import { ViewConnection } from './transport.js';
 import type { HostSettings } from '../services/settings.js';
+import { loadGuildBuild } from '../services/guild-build.js';
 
 export function createHost(options: { config: Config; runtime: Runtime; assets: AssetSource;
   sessions: SessionRegistry; diagnostics: DiagnosticLogger; hostInstanceId: string; token: string;
   plugins?: Pick<LoadedPlugins, 'summaries' | 'jobs' | 'folders'>;
+  guildBuild?: GuildBuildSummary;
   settings?: HostSettings;
   ready?: { file: string; refusals: ReadyRecord['refusals'] } }) {
   const { assets, sessions, diagnostics, hostInstanceId, token } = options;
+  sessions.bindDiagnosticHost(hostInstanceId);
   let config = options.config;
+  let guildBuild = options.guildBuild;
   const pluginProfiles = config.launchProfiles.filter(profile => options.plugins?.summaries.some(plugin =>
     plugin.profiles.includes(profile.id) || plugin.commands.includes(profile.id)));
   const plugins = options.plugins ?? { summaries: [], jobs: new Set<string>(), folders: new Map<string, string>() };
@@ -56,6 +60,7 @@ export function createHost(options: { config: Config; runtime: Runtime; assets: 
           json(response, 403, { error: 'Settings require an authenticated same-origin request.' }); return;
         }
         if (!options.settings) { json(response, 503, { error: 'This host has no writable configuration store.' }); return; }
+        let committed: { document: SettingsDocument; prepared: { config: Config; guildBuild?: GuildBuildSummary; limits: EffectiveLimits } };
         try {
           if (request.method === 'GET') { json(response, 200, options.settings.get()); return; }
           if (request.method !== 'PUT') { json(response, 405, { error: 'Method not supported' }); return; }
@@ -66,19 +71,35 @@ export function createHost(options: { config: Config; runtime: Runtime; assets: 
             if (bytes > 262144) { json(response, 413, { error: 'Settings exceed 256 KiB.' }); return; }
             chunks.push(data);
           }
-          const saved = options.settings.save(JSON.parse(Buffer.concat(chunks).toString('utf8')));
-          // Only the editor's advertised live fields apply. Unrelated operator edits wait for restart.
-          config = { ...config, port: saved.config.port, allowedProjectDirectories: saved.config.allowedProjectDirectories,
-            launchProfiles: [...saved.config.launchProfiles, ...pluginProfiles],
-            terminal: { ...config.terminal, scrollbackLines: saved.config.terminal.scrollbackLines, recentOutputBytes: saved.config.terminal.recentOutputBytes },
-            capacity: { ...config.capacity, maxRunningSessions: saved.config.capacity.maxRunningSessions, maxViews: saved.config.capacity.maxViews } };
-          sessions.updateConfiguration(config);
-          limits = { terminal: config.terminal, capacity: config.capacity, control: config.control, transport: config.transport };
-          json(response, 200, saved.document); return;
+          committed = options.settings.save(JSON.parse(Buffer.concat(chunks).toString('utf8')), candidate => {
+            const profiles = [...candidate.launchProfiles, ...pluginProfiles];
+            if (profiles.length > 64 || new Set(profiles.map(profile => profile.id)).size !== profiles.length) {
+              throw new Error('SETTINGS_INVALID: Core profiles conflict with loaded plugins or exceed 64 profiles. Restart the host after changing profile definitions.');
+            }
+            const guild = loadGuildBuild(options.runtime.root, { ...candidate, launchProfiles: profiles });
+            // Only the editor's advertised live fields apply. Unrelated operator edits wait for restart.
+            const nextConfig = { ...config, port: candidate.port, allowedProjectDirectories: candidate.allowedProjectDirectories,
+              launchProfiles: guild.config.launchProfiles,
+              terminal: { ...config.terminal, scrollbackLines: candidate.terminal.scrollbackLines, recentOutputBytes: candidate.terminal.recentOutputBytes },
+              capacity: { ...config.capacity, maxRunningSessions: candidate.capacity.maxRunningSessions, maxViews: candidate.capacity.maxViews } };
+            return { config: nextConfig, guildBuild: guild.state, limits: { terminal: nextConfig.terminal, capacity: nextConfig.capacity,
+              control: nextConfig.control, transport: nextConfig.transport } };
+          });
         } catch (error) {
           const message = error instanceof Error ? error.message : 'Settings could not be saved.';
           json(response, message.startsWith('SETTINGS_CONFLICT:') ? 409 : 400, { error: message }); return;
         }
+        // Preparation and durable commit succeeded. No validation or filesystem work follows the commit.
+        config = committed.prepared.config; guildBuild = committed.prepared.guildBuild; limits = committed.prepared.limits;
+        sessions.updateConfiguration(config);
+        json(response, 200, committed.document); return;
+      }
+      if (url.pathname === '/api/guild-build') {
+        if (!validToken(typeof request.headers['x-automata-token'] === 'string' ? request.headers['x-automata-token'] : null)) {
+          json(response, 403, { error: 'Build information requires an authenticated local request.' }); return;
+        }
+        if (request.method !== 'GET') { json(response, 405, { error: 'Method not supported' }); return; }
+        json(response, 200, { guildBuild: guildBuild ?? null }); return;
       }
       if (request.method !== 'GET') { json(response, 405, { error: 'Method not supported' }); return; }
       if (url.pathname === '/health') {
@@ -145,15 +166,18 @@ export function createHost(options: { config: Config; runtime: Runtime; assets: 
           plugins: plugins.summaries.map(plugin => plugin.name), refusals: options.ready.refusals });
     })(),
     close: (): Promise<void> => closing ??= (async () => {
+      log('host-stop-start');
       clearInterval(heartbeat); for (const view of [...views.values()]) view.close(1001, 'Host stopping');
       for (const socket of sockets.clients) socket.terminate(); control.dispose();
       let cleanupFailed = false;
-      try { await sessions.shutdown(); }
+      try { await sessions.shutdown(); log('host-stop-sessions'); }
       catch (error) { cleanupFailed = true; throw error; }
       finally {
         if (options.ready) removeReadyFile(options.ready.file, process.pid);
         await new Promise<void>(resolve => sockets.close(() => resolve()));
+        log('host-stop-websockets');
         await local.close();
+        log('host-stop-http');
         log('host-stop', cleanupFailed ? { code: 'HOST_SHUTDOWN_FAILED' } : {});
       }
     })(),

@@ -48,19 +48,21 @@ export class NodePtyLauncher implements PtyLauncher {
     if (!Number.isSafeInteger(terminal.pid) || terminal.pid <= 0) throw new Error('PTY_LAUNCH_FAILED: Check the configured executable and project directory.');
     const ownership: ProcessTreeOwnership = { processes: new Map(), createdAfter, createdBefore: Date.now() };
     let exitCode: number | undefined;
+    let cleanupVerified = false;
     let stopping: Promise<StopResult> | undefined;
     terminal.onExit(event => { exitCode = event.exitCode; ownership.exitedAt = Date.now(); });
     const output = new Set<(data: string) => void>();
-    const exits = new Set<(code: number) => void>();
+    const exits = new Set<(code: number, cleanupRequired?: boolean) => void>();
     terminal.onData(data => { for (const callback of output) callback(data); });
-    terminal.onExit(event => { for (const callback of exits) callback(event.exitCode); });
+    // ConPTY exit proves only that the primary exited. Retain ownership until lineage cleanup is verified.
+    terminal.onExit(event => { for (const callback of exits) callback(event.exitCode, !cleanupVerified); });
     return {
-      pid: terminal.pid,
+      pid: terminal.pid, cleanupScope: 'tracked-descendants',
       write: data => { if (exitCode !== undefined) throw new Error('SESSION_EXITED'); terminal.write(data); },
       resize: (columns, lines) => { if (exitCode !== undefined) throw new Error('SESSION_EXITED'); terminal.resize(columns, lines); },
       pause: () => { if (!stopping) terminal.pause(); }, resume: () => terminal.resume(),
       onOutput: callback => { output.add(callback); return () => { output.delete(callback); }; },
-      onExit: callback => { exits.add(callback); if (exitCode !== undefined) queueMicrotask(() => { if (exits.has(callback)) callback(exitCode!); }); return () => { exits.delete(callback); }; },
+      onExit: callback => { exits.add(callback); if (exitCode !== undefined) queueMicrotask(() => { if (exits.has(callback)) callback(exitCode!, !cleanupVerified); }); return () => { exits.delete(callback); }; },
       stop: () => {
         if (stopping) return stopping;
         const attempt = (async () => {
@@ -70,7 +72,8 @@ export class NodePtyLauncher implements PtyLauncher {
           if (Date.now() >= deadline) throw new Error('PTY_DRAIN_TIMEOUT: Final output/exit was not confirmed.');
           await new Promise(resolve => setTimeout(resolve, 25));
         }
-        return { exitCode, verifiedPids };
+        cleanupVerified = true;
+        return { exitCode, verifiedPids, cleanupScope: 'tracked-descendants' as const };
         })();
         stopping = attempt;
         // Stop drains final output/exit even if parser or consumer backpressure previously paused the pipe.

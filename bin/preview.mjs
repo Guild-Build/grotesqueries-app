@@ -12,6 +12,5 @@ try { fs.writeFileSync(file, JSON.stringify(template, null, 2) + '\n', { flag: '
 catch (error) { if (error.code !== 'EEXIST') throw error; }
 process.env.GROTESQUERIES_CONFIG = file;
 console.log('Source compatibility preview: no launch profiles are installed.');
-console.log('Native macOS/Linux terminal sessions are not yet supported.');
 console.log(`Configuration: ${file}`);
 await import('./start.mjs');

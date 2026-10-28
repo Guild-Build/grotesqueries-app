@@ -1,20 +1,22 @@
-import type { Bootstrap, SessionSummary, ServerMessage } from '@grotesqueries/protocol';
+import { decodeGuildBuild, type Bootstrap, type SessionSummary, type ServerMessage } from '@grotesqueries/protocol';
 import { HostClient, type ConnectionState } from './client.js';
 import { InputMarkerStore } from './input-markers.js';
 import { InputSender } from './input.js';
 import { RecentSessions, type RecentSession } from './state.js';
 import { TerminalStreamView } from './terminal/stream.js';
 import { FrameShell } from './shell.js';
+import { renderGuildBuild } from './guild-build.js';
 import { decodeFleet, readFleetSelection, splitTarget, type FleetHost } from './fleet.js';
 import { activateTab, boundLine, closeTab, openTab, readSelection, refusedAtBound, writeSelection, type TabOrder } from './tabs.js';
 import '@xterm/xterm/css/xterm.css';
 import '../assets/stylesheets/application.css';
+import '../assets/stylesheets/guild-build.css';
 
 const app = document.querySelector<HTMLDivElement>('#app'); if (!app) throw new Error('Application root missing');
 app.innerHTML = `
 <div id="frame" class="shell">
-  <header id="title-bar" class="title-bar"><span id="title-name" class="title-name">Automata</span><span id="title-instance" class="title-field" title="Host instance"></span><span id="title-protocol" class="title-field"></span><span id="title-address" class="title-field"></span>
-    <div class="layout-actions"><button id="toggle-sessions" type="button" aria-controls="sessions-panel" aria-pressed="true">Sessions</button><button id="toggle-panel" type="button" aria-controls="panel-slot" aria-pressed="true">Panel slot</button><button id="toggle-zen" type="button" aria-pressed="false">Zen</button><button id="open-settings" type="button" aria-controls="settings-view" aria-pressed="false">Settings</button></div></header>
+  <header id="title-bar" class="title-bar"><span id="title-name" class="title-name">Grotesqueries</span><span id="title-instance" class="title-field" title="Host instance"></span><span id="title-protocol" class="title-field"></span><span id="title-address" class="title-field"></span>
+    <div class="layout-actions"><button id="toggle-sessions" type="button" aria-controls="sessions-panel" aria-pressed="true">Sessions</button><button id="toggle-panel" type="button" aria-controls="panel-slot" aria-pressed="true">BuildGuild</button><button id="toggle-zen" type="button" aria-pressed="false">Zen</button><button id="open-settings" type="button" aria-controls="settings-view" aria-pressed="false">Settings</button></div></header>
   <aside id="sessions-panel" class="sidebar" aria-label="Sessions panel">
     <section id="panel-start" class="panel-section"><h1 class="panel-heading">Start</h1>
       <label id="host-picker-label" hidden>Host <select id="host-picker" aria-label="Host"></select></label><p id="fleet-status" class="small-note" hidden></p>
@@ -59,7 +61,7 @@ app.innerHTML = `
     </section>
   </main>
   <div id="right-gutter" class="gutter" role="separator" tabindex="0" aria-label="Resize panel slot" aria-orientation="vertical" aria-controls="panel-slot" aria-valuemin="3" aria-valuemax="40" title="Drag or use arrow keys to resize; double-click or Home to reset"></div>
-  <aside id="panel-slot" class="panel-slot" aria-label="Panel slot"><div class="slot-empty"><strong>Panel slot</strong><p>A place beside your session for future modules.</p><span>No panel mounted. Module support is not implemented in this shell.</span></div></aside>
+  <aside id="panel-slot" class="panel-slot" aria-label="BuildGuild build and tools"></aside>
   <footer id="status-bar" class="status-bar"><span class="host-state"><span id="status-dot" class="status-dot"></span><span id="host-status" role="status">Connecting to host…</span><button id="retry" class="text-button" type="button">Retry</button></span><span id="workspace-state">No session selected</span><span id="grid" class="grid-label"></span><span id="history-state">Host owns process lifetime.</span><span id="input-state">Views open in observation mode.</span><label class="accessibility-option"><input id="screen-reader" type="checkbox"> Screen reader mode</label></footer>
 </div>
 <dialog id="stop-dialog"><form method="dialog"><p class="eyebrow">PROCESS LIFETIME</p><h3>Stop this process?</h3><p id="stop-description"></p><p>Stop attempts to end this session’s tracked processes. The retained terminal stays available for inspection.</p><div class="dialog-actions"><button value="cancel">Cancel</button><button id="confirm-stop" value="stop" class="danger">Stop process</button></div></form></dialog>`;
@@ -88,6 +90,7 @@ let selectedHost: HostState = { id: 'local', label: 'Local host', route: '', onl
   actions: ['observe', 'start', 'control', 'stop', 'settings'], inventory: new Map(), connection: 'connecting' };
 hosts.set('local', selectedHost);
 let bootstrap: Bootstrap | undefined;
+let guildBuildRequest = 0;
 let connection: ConnectionState = 'connecting'; let pageNotice = ''; let starting = false; let restored = false;
 const tabs = new Map<string, Tab>(); let order: TabOrder = { sessions: [] };
 let markers: InputMarkerStore | undefined; let storageProblem = '';
@@ -171,6 +174,7 @@ function restoreTabs(): void {
 }
 /** Requirement 4.1.2: Pages, inert, one row per plugin page; Plugins, one row per plugin with its contract. */
 function renderPlugins(): void {
+  void updateGuildBuild();
   const row = (label: string, detail: string) => { const item = document.createElement('div'); item.className = 'panel-row';
     const name = document.createElement('span'); name.textContent = label; const note = document.createElement('span'); note.className = 'row-id'; note.textContent = detail;
     item.append(name, note); return item; };
@@ -179,6 +183,22 @@ function renderPlugins(): void {
   element('plugins').replaceChildren(...plugins.map(plugin => row(plugin.name, 'contract ' + plugin.contract)));
   if (!element('pages').childElementCount) element('pages').append(row('none: no plugin loaded', ''));
   if (!plugins.length) element('plugins').append(row('0 loaded', ''));
+}
+async function updateGuildBuild(): Promise<void> {
+  const request = ++guildBuildRequest;
+  const value = bootstrap; const owner = selectedHost;
+  if (!value) { renderGuildBuild(element('panel-slot'), null, 'Build information is unavailable while the host is disconnected.'); return; }
+  renderGuildBuild(element('panel-slot'), null, 'Checking this installation’s build information…');
+  try {
+    const response = await fetch(owner.route + '/api/guild-build', { headers: { 'x-automata-token': value.token }, cache: 'no-store' });
+    if (!response.ok) throw new Error('Build information unavailable.');
+    const result = decodeGuildBuild(await response.json());
+    if (request === guildBuildRequest && selectedHost === owner && bootstrap === value) renderGuildBuild(element('panel-slot'), result.guildBuild);
+  } catch {
+    if (request === guildBuildRequest && selectedHost === owner && bootstrap === value) {
+      renderGuildBuild(element('panel-slot'), null, 'This host has no readable build information. Browse the catalog or update the host to use preconfigured builds.');
+    }
+  }
 }
 /** The panel's messages: inventory and session rows. Each tab reads its own socket's control, input and stream messages. */
 function receive(message: ServerMessage, owner = selectedHost): void {
@@ -443,7 +463,7 @@ function render(): void {
   const limitedCleanup = item?.failureCode === 'CLEANUP_SCOPE_LIMITED';
   const sessionNotice = item?.failureCode && !limitedCleanup ? `Session failure: ${item.failureCode}. Inspect and Stop deliberately.` : '';
   const message = [input?.problem ?? (storageProblem || tab?.notice || pageNotice || sessionNotice), limitedCleanup
-    ? 'Mac alpha: Stop verifies tracked processes only. A daemon that detaches before it is observed may remain running.' : ''].filter(Boolean).join(' ');
+    ? 'Native alpha: Stop verifies tracked processes only. A daemon that detaches before it is observed may remain running.' : ''].filter(Boolean).join(' ');
   element('notice').hidden = !message; element('notice').textContent = message;
   const details = element('metadata'); details.replaceChildren();
   for (const [label, value] of [['Session ID', tab?.sessionId], ['Profile', display?.profileId], ['Created', display?.createdAt],

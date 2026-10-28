@@ -134,7 +134,7 @@ export function packagePosix(sourceRoot = root) {
     const dirty = execFileSync('git', ['status', '--porcelain', '--untracked-files=normal'], { cwd: sourceRoot, encoding: 'utf8' }).trim() !== '';
     const buildMetadata = { application: metadata.name, version: metadata.version, releaseChannel: 'native-alpha',
       platform: process.platform, architecture: process.arch, node: process.version, nodeAbi: process.versions.modules,
-      sourceRevision: revision, sourceDirty: dirty, signing: process.platform === 'darwin' ? 'unsigned-and-unnotarized' : 'unsigned',
+      sourceRevision: revision, sourceDirty: dirty, guildBuildPresetVersion: 1, signing: process.platform === 'darwin' ? 'unsigned-and-unnotarized' : 'unsigned',
       nativeCleanup: process.platform === 'darwin' ? 'tracked-descendants' : 'per-session-subreaper',
       nodeBinarySha256: sha256(fs.readFileSync(process.execPath)) };
     if (process.platform === 'darwin') Object.assign(buildMetadata, {

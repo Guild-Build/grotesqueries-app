@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { nativeStopFailure } from '../../lib/local-web/native-command-diagnostics.mjs';
 import { utf8Bytes, type SessionSummary } from '@grotesqueries/protocol';
 import { revalidateProfile, type Config } from '../../config/application.js';
 import type { DiagnosticLogger } from '../services/diagnostics.js';
@@ -68,6 +69,11 @@ export class SessionRegistry {
   private closing = false;
   private exitCounter = 0;
   private shutdownOperation?: Promise<void>;
+  private diagnosticHostInstanceId?: string;
+  bindDiagnosticHost(hostInstanceId: string): void {
+    if (this.diagnosticHostInstanceId !== undefined && this.diagnosticHostInstanceId !== hostInstanceId) throw new Error('SESSION_HOST_ALREADY_BOUND');
+    this.diagnosticHostInstanceId = hostInstanceId;
+  }
   constructor(private readonly options: { config?: Config; launcher?: PtyLauncher;
     diagnostics?: Pick<DiagnosticLogger, 'log'>; now?: () => Date; id?: () => string;
     shutdownTimeoutMs?: number; jobs?: ReadonlySet<string>; jobLimits?: Config['jobs']; jobStopRetryMs?: number } = {}) {}
@@ -197,7 +203,7 @@ export class SessionRegistry {
     }, error => {
       record.metadata.stopPending = false; record.metadata.failureCode = 'STOP_FAILED';
       record.stopOperation = undefined; this.changed(record);
-      this.log('pty-error', { sessionId: id, code: 'STOP_FAILED' }); throw error;
+      this.log('pty-error', { sessionId: id, code: 'STOP_FAILED', nativeFailure: nativeStopFailure(error) }); throw error;
     });
     record.stopOperation = operation;
     return operation;
@@ -259,6 +265,6 @@ export class SessionRegistry {
     }
   }
   private log(event: Parameters<DiagnosticLogger['log']>[0], fields: Record<string, unknown>): void {
-    try { this.options.diagnostics?.log(event, fields); } catch { console.error('DIAGNOSTICS_WRITE_FAILED'); }
+    try { this.options.diagnostics?.log(event, { ...fields, ...(this.diagnosticHostInstanceId ? { hostInstanceId: this.diagnosticHostInstanceId } : {}) }); } catch { console.error('DIAGNOSTICS_WRITE_FAILED'); }
   }
 }

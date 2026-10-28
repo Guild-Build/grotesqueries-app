@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { WebSocket } from 'ws';
+import { DiagnosticLogger } from '../../app/services/diagnostics.js';
 import { bridgeFixture } from '../support/bridge-fixture.js';
 
 test('actual async WS Start deduplicates pending/completed/evicted requests without implicit starts', async () => {
@@ -143,4 +144,20 @@ test('automatic restore errors belong only to the active capture generation', as
       assert.equal(record.metadata.processState, 'running'); assert.equal(f.launcher.handles[0].stops, 0);
     } finally { await peer.close(); await f.host.close(); }
   }
+});
+
+
+test('shutdown lifecycle observation failures never prevent session or server cleanup', async () => {
+  const original = DiagnosticLogger.prototype.log, phases: string[] = [];
+  const f = await bridgeFixture();
+  await f.sessions.start('powershell', 80, 24);
+  DiagnosticLogger.prototype.log = function (event, fields) {
+    if (event.startsWith('host-stop')) { phases.push(event); throw new Error('OWNED_DIAGNOSTIC_DISK_FAILURE'); }
+    return original.call(this, event, fields);
+  };
+  try {
+    await f.host.close(); assert.equal(f.launcher.handles[0].stops, 1);
+    assert.deepEqual(phases, ['host-stop-start', 'host-stop-sessions', 'host-stop-websockets', 'host-stop-http', 'host-stop']);
+    await assert.rejects(fetch(f.host.origin + '/api/bootstrap'));
+  } finally { DiagnosticLogger.prototype.log = original; await f.host.close(); }
 });
