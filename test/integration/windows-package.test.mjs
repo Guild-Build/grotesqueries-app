@@ -198,3 +198,69 @@ test('Windows consumer requires controller disposal and reports containment as f
     assert.deepEqual(calls, ['stop', 'dispose']); assert.equal(fs.existsSync(folder), false);
   } finally { fs.rmSync(folder, { recursive: true, force: true }); }
 });
+
+test('Windows semantic screen preserves exact Unicode across split VT redraws and snapshot replacement', async () => {
+  const { WindowsFixtureScreens } = await import('../../bin/consumer-windows.mjs');
+  const screens = new WindowsFixtureScreens(), id = 'owned-terminal';
+  const begin = (sessionId, snapshotId, cols, rows) => screens.accept({ type: 'snapshot-begin', sessionId, snapshotId, cols, rows });
+  const chunk = (sessionId, snapshotId, data) => screens.accept({ type: 'snapshot-chunk', sessionId, snapshotId, data });
+  try {
+    begin(id, 'first', 100, 30);
+    const chunks = ['WINDOWS_ECHO:Unico', 'de-λXé', '\x1b[1;23H', '界é'];
+    for (const data of chunks) chunk(id, 'first', data);
+    screens.accept({ type: 'snapshot-end', sessionId: id, snapshotId: 'first' });
+    assert.equal(chunks.join('').includes('WINDOWS_ECHO:Unicode-λ界é'), false);
+    assert.ok((await screens.text(id)).includes('WINDOWS_ECHO:Unicode-λ界é'));
+    screens.accept({ type: 'grid', sessionId: id, cols: 90, rows: 25 });
+    screens.accept({ type: 'output', sessionId: id, data: '\r\nWINDOWS_GRID:90x25' });
+    assert.ok((await screens.text(id)).includes('WINDOWS_GRID:90x25'));
+    assert.equal((await screens.diagnostics(id)).cols, 90); assert.equal((await screens.diagnostics(id)).rows, 25);
+    begin('sibling', 'other', 80, 24); chunk('sibling', 'other', 'unrelated fixture');
+    begin(id, 'restored', 70, 12); chunk(id, 'restored', 'WINDOWS_ECHO:Unicode-λ界é');
+    assert.equal((await screens.diagnostics(id)).cols, 70); assert.equal((await screens.diagnostics(id)).rows, 12);
+    assert.equal((await screens.text(id)).includes('WINDOWS_GRID'), false, 'A new snapshot replaces prior screen state');
+    assert.ok((await screens.text(id)).includes('WINDOWS_ECHO:Unicode-λ界é'));
+    assert.equal((await screens.text(id)).includes('unrelated'), false);
+    assert.throws(() => chunk(id, 'stale', 'bad'), /SNAPSHOT_ID/);
+  } finally { await screens.dispose(); }
+});
+
+test('Windows input checks require exact accepted ACK and surface errors without waiting for output', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { WindowsConsumerPeer } = await import('../../bin/consumer-windows.mjs');
+  for (const mode of ['accepted', 'denied', 'duplicate']) {
+    const socket = new EventEmitter();
+    socket.send = bytes => {
+      const message = JSON.parse(bytes);
+      assert.equal(message.type, 'input');
+      socket.emit('message', Buffer.from(JSON.stringify({ type: 'input-ack', sessionId: 'wrong', leaseId: message.leaseId, inputId: message.inputId, disposition: 'accepted' })));
+      const frame = mode === 'denied' ? { type: 'error', code: 'CONTROL_REQUIRED', sessionId: message.sessionId, inputId: message.inputId }
+        : { type: 'input-ack', sessionId: message.sessionId, leaseId: message.leaseId, inputId: message.inputId, disposition: mode === 'accepted' ? 'accepted' : 'already-seen' };
+      socket.emit('message', Buffer.from(JSON.stringify(frame)));
+    };
+    const peer = new WindowsConsumerPeer(socket);
+    if (mode === 'accepted') await peer.input('owned', 'owned-lease', 1, 'ASCII-probe\r');
+    else await assert.rejects(peer.input('owned', 'owned-lease', 1, 'ASCII-probe\r'), mode === 'denied' ? /INPUT_FAILED: CONTROL_REQUIRED/ : /INPUT_NOT_ACCEPTED/);
+    const proof = await peer.fixtureDiagnostics('owned'); assert.equal(JSON.stringify(proof).includes('owned-lease'), false);
+    await peer.screens.dispose();
+  }
+});
+
+test('accepted input cannot conceal a prior or concurrent terminal protocol failure', async () => {
+  const { EventEmitter } = await import('node:events');
+  const { WindowsConsumerPeer } = await import('../../bin/consumer-windows.mjs');
+  const socket = new EventEmitter();
+  socket.send = bytes => {
+    const message = JSON.parse(bytes);
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'output', sessionId: message.sessionId, data: 'invalid before snapshot' })));
+    socket.emit('message', Buffer.from(JSON.stringify({ type: 'input-ack', sessionId: message.sessionId, leaseId: message.leaseId, inputId: message.inputId, disposition: 'accepted' })));
+  };
+  const peer = new WindowsConsumerPeer(socket);
+  await assert.rejects(peer.input('owned', 'lease', 1, 'ASCII-probe\r'), /SCREEN_WITHOUT_SNAPSHOT/);
+  await peer.screens.dispose();
+  const later = new WindowsConsumerPeer(new EventEmitter());
+  await assert.rejects(later.until(async () => {
+    await Promise.resolve(); later.error = new Error('OWNED_ASYNC_PARSER_FAILURE'); return true;
+  }, 'ready'), /OWNED_ASYNC_PARSER_FAILURE/);
+  await later.screens.dispose();
+});

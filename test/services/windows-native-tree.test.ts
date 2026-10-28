@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import test from 'node:test';
-import { getProcessSnapshot, stopProcessTree, type ProcessSnapshotRow, type ProcessTreeOwnership, type WindowsProcessCommand } from '../../app/services/process-tree.js';
+import { windowsProcessHelperEnvironment, getProcessSnapshot, stopProcessTree, type ProcessSnapshotRow, type ProcessTreeOwnership, type WindowsProcessCommand } from '../../app/services/process-tree.js';
 
 const execute = promisify(execFile);
 const root: ProcessSnapshotRow = { ProcessId: 91001, ParentProcessId: 1, CreationDate: '2026-10-27T20:00:00.000Z' };
@@ -194,4 +194,17 @@ test('the read retry allowance is shared across the whole Stop and never retries
     effects++; throw timedOut();
   }), /STOP_TREE_FAILED/);
   assert.equal(snapshots, 1); assert.equal(effects, 1);
+});
+
+
+test('private Windows process helper pins OS modules without mutating inherited or CLI environment', () => {
+  for (const aliases of [{}, { PSModulePath: 'C:\\pwsh7-modules' }, { PsModulePath: 'missing-one', psmodulepath: 'missing-two' }]) {
+    const parent = { SystemRoot: 'C:\\Windows', PATH: 'owned-cli-path', OWNED_CLI_SETTING: 'preserved', ...aliases };
+    const before = { ...parent }, helper = windowsProcessHelperEnvironment(parent);
+    assert.deepEqual(parent, before); assert.notEqual(helper, parent);
+    assert.deepEqual(Object.keys(helper).filter(key => key.toUpperCase() === 'PSMODULEPATH'), ['PSModulePath']);
+    assert.equal(helper.PSModulePath, 'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\Modules');
+    assert.equal(helper.PATH, parent.PATH); assert.equal(helper.OWNED_CLI_SETTING, parent.OWNED_CLI_SETTING);
+  }
+  assert.throws(() => windowsProcessHelperEnvironment({ SystemRoot: 'relative' }), /STOP_SYSTEMROOT_INVALID/);
 });

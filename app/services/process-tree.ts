@@ -18,10 +18,17 @@ class WindowsProcessCommandFailure extends Error {
     super(code + ': Owned process metadata or cleanup was not verified; retry deliberately.', { cause });
   }
 }
+/** Isolate only our private PS5.1 metadata helper from inherited/pwsh module search paths. */
+export function windowsProcessHelperEnvironment(parent: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const systemRoot = Object.entries(parent).find(([key]) => key.toUpperCase() === 'SYSTEMROOT')?.[1];
+  if (!systemRoot || !path.win32.isAbsolute(systemRoot)) throw new Error('STOP_SYSTEMROOT_INVALID');
+  return { ...Object.fromEntries(Object.entries(parent).filter(([key]) => key.toUpperCase() !== 'PSMODULEPATH')),
+    PSModulePath: path.win32.join(systemRoot, 'System32/WindowsPowerShell/v1.0/Modules') };
+}
 const executeWindowsCommand: WindowsProcessCommand = (_phase, source, options) => execute(resolveExecutable(powershell),
-  ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', source], { windowsHide: true, ...options });
-const snapshotSource = "$ErrorActionPreference='Stop'; Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate -ErrorAction Stop | " +
-  "Select-Object ProcessId,ParentProcessId,@{n='CreationDate';e={$_.CreationDate.ToUniversalTime().ToString('o')}} | ConvertTo-Json -Compress";
+  ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command', source], { windowsHide: true, ...options, env: windowsProcessHelperEnvironment(process.env) });
+const snapshotSource = "$ErrorActionPreference='Stop'; CimCmdlets\\Get-CimInstance -ClassName Win32_Process -Property ProcessId,ParentProcessId,CreationDate -ErrorAction Stop | " +
+  "Microsoft.PowerShell.Utility\\Select-Object ProcessId,ParentProcessId,@{n='CreationDate';e={$_.CreationDate.ToUniversalTime().ToString('o')}} | Microsoft.PowerShell.Utility\\ConvertTo-Json -Compress";
 function bytes(value: unknown): number { return typeof value === 'string' || Buffer.isBuffer(value) ? Buffer.byteLength(value) : 0; }
 async function runCommand(phase: 'snapshot' | 'stop', source: string, options: CommandOptions, executeCommand: WindowsProcessCommand) {
   const started = performance.now();

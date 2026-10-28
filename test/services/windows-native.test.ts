@@ -65,6 +65,7 @@ async function exercise(name: string, directory: string): Promise<CaseReport> {
   let pty: PtyHandle | undefined, sibling: ChildProcess | undefined, siblingExited: Promise<unknown> | undefined;
   let primary: ErrorRecord | undefined, cleanupVerified = false, injectedFailure = false;
   const cleanupErrors: ErrorRecord[] = [], knownPids: number[] = [];
+  const originalModules = Object.entries(process.env).filter(([key]) => key.toUpperCase() === 'PSMODULEPATH');
   try {
     if (name === 'natural-exit') {
       const grandchild = 'setInterval(()=>{},1000)';
@@ -102,6 +103,19 @@ async function exercise(name: string, directory: string): Promise<CaseReport> {
       let cleanup: boolean | undefined; pty.onExit((_code, remaining) => { cleanup = remaining; });
       await until(() => cleanup !== undefined, 'failed cleanup evidence'); assert.equal(cleanup, true);
       injectedFailure = false; assert.equal((await pty.stop()).exitCode, 5);
+    } else if (name === 'modules-absent' || name === 'modules-poisoned') {
+      for (const key of Object.keys(process.env)) if (key.toUpperCase() === 'PSMODULEPATH') delete process.env[key];
+      const expected = name === 'modules-poisoned' ? path.join(directory, 'missing-pwsh7-modules') : null;
+      if (expected !== null) process.env.PsModulePath = expected;
+      const source = "console.log('MODULES_UNCHANGED:'+((process.env.PSModulePath??null)===" + JSON.stringify(expected) + "?'yes':'no'));setInterval(()=>{},1000)";
+      pty = await launch(source, directory);
+      knownPids.push(pty.pid); let output = ''; pty.onOutput(data => { output += data; });
+      sibling = spawn(process.execPath, ['-e', 'setInterval(()=>{},1000)'], { windowsHide: true, stdio: 'ignore' });
+      siblingExited = once(sibling, 'exit'); void siblingExited.catch(() => {}); if (sibling.pid) knownPids.push(sibling.pid);
+      await until(() => output.includes('MODULES_UNCHANGED:yes'), 'unchanged CLI module environment');
+      const stopped = await pty.stop(); assert.ok(stopped.verifiedPids.includes(pty.pid));
+      assert.equal(alive(pty.pid), false); assert.ok(alive(sibling.pid!));
+      assert.equal(process.env.PSModulePath ?? null, expected, 'Private helper must not mutate host or CLI environment');
     } else throw new Error('WINDOWS_NATIVE_CASE_INVALID');
   } catch (error) { primary = recordError(error); }
   finally {
@@ -115,6 +129,8 @@ async function exercise(name: string, directory: string): Promise<CaseReport> {
       catch (error) { cleanupErrors.push(recordError(error)); cleanupVerified = false; }
     }
   }
+  for (const key of Object.keys(process.env)) if (key.toUpperCase() === 'PSMODULEPATH') delete process.env[key];
+  for (const [key, value] of originalModules) process.env[key] = value;
   return { name, passed: !primary && !cleanupErrors.length && cleanupVerified, cleanupVerified, knownPids, primary, cleanupErrors };
 }
 
@@ -189,6 +205,8 @@ if (worker) {
   });
   test('Windows natural root exit retains child/grandchild ownership and late exit subscribers until verified Stop', { skip, timeout: workerBudgetMs + 5000 },
     () => isolated('natural-exit', fixtureDirectory()));
+  for (const name of ['modules-absent', 'modules-poisoned']) test('Windows private cleanup helper preserves siblings and CLI environment with ' + name,
+    { skip, timeout: workerBudgetMs + 5000 }, () => isolated(name, fixtureDirectory()));
   test('Windows failed Stop remains retryable after primary exit and does not clear cleanup evidence', { skip, timeout: workerBudgetMs + 5000 },
     () => isolated('failed-stop', fixtureDirectory()));
 }

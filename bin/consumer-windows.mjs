@@ -10,6 +10,8 @@ import { once } from 'node:events';
 import { fileURLToPath } from 'node:url';
 import { inflateRawSync, crc32 } from 'node:zlib';
 import WebSocket from 'ws';
+import Headless from '@xterm/headless';
+import Unicode11 from '@xterm/addon-unicode11';
 import { assertNoEmbeddedAuthenticode } from './windows-pe.mjs';
 import { startOwnedWindowsHost, probeWindowsPowerShell } from './windows-host-fixture.mjs';
 export { startOwnedWindowsHost } from './windows-host-fixture.mjs';
@@ -80,12 +82,51 @@ export function verifyWindowsFiles(folder, { configured = false } = {}) {
   return seen;
 }
 
-class Peer {
+/** Render exactly what a terminal user sees, independently for each session/snapshot. */
+export class WindowsFixtureScreens {
+  constructor() { this.sessions = new Map(); }
+  accept(frame) {
+    if (frame.type === 'snapshot-begin') {
+      let entry = this.sessions.get(frame.sessionId);
+      if (!entry) {
+        const terminal = new Headless.Terminal({ cols: frame.cols, rows: frame.rows, scrollback: 1000, allowProposedApi: true, logLevel: 'off' });
+        terminal.loadAddon(new Unicode11.Unicode11Addon()); terminal.unicode.activeVersion = '11';
+        entry = { terminal, queue: Promise.resolve(), raw: '' }; this.sessions.set(frame.sessionId, entry);
+      }
+      entry.snapshotId = frame.snapshotId; entry.raw = '';
+      entry.queue = entry.queue.then(() => { entry.terminal.reset(); entry.terminal.resize(frame.cols, frame.rows); });
+      return;
+    }
+    if (!['snapshot-chunk', 'snapshot-end', 'output', 'grid'].includes(frame.type)) return;
+    const entry = this.sessions.get(frame.sessionId); if (!entry) throw new Error('WINDOWS_FIXTURE_SCREEN_WITHOUT_SNAPSHOT');
+    if (frame.type.startsWith('snapshot-') && entry.snapshotId !== frame.snapshotId) throw new Error('WINDOWS_FIXTURE_SNAPSHOT_ID');
+    if (frame.type === 'snapshot-end') { entry.snapshotId = undefined; return; }
+    if (frame.type === 'grid') entry.queue = entry.queue.then(() => { entry.terminal.resize(frame.cols, frame.rows); });
+    else {
+      entry.raw = (entry.raw + frame.data).slice(-8192);
+      entry.queue = entry.queue.then(() => new Promise(resolve => { entry.terminal.write(frame.data, resolve); }));
+    }
+  }
+  async text(sessionId) {
+    const entry = this.sessions.get(sessionId); if (!entry) return '';
+    await entry.queue; const buffer = entry.terminal.buffer.active, lines = [];
+    for (let index = 0; index < buffer.length; index++) lines.push(buffer.getLine(index)?.translateToString(true) ?? '');
+    return lines.join('\n');
+  }
+  async diagnostics(sessionId) {
+    const entry = this.sessions.get(sessionId); if (!entry) return { rawVt: '', screen: '' };
+    const screen = (await this.text(sessionId)).slice(-8192), rawVt = entry.raw;
+    return { cols: entry.terminal.cols, rows: entry.terminal.rows, rawVt, rawCodePoints: Array.from(rawVt, char => char.codePointAt(0)), screen };
+  }
+  async dispose() { for (const entry of this.sessions.values()) { await entry.queue; entry.terminal.dispose(); } this.sessions.clear(); }
+}
+
+export class WindowsConsumerPeer {
   constructor(socket) {
-    this.socket = socket; this.frames = []; this.nextRequest = 0; this.output = '';
+    this.socket = socket; this.frames = []; this.nextRequest = 0; this.output = ''; this.screens = new WindowsFixtureScreens();
     socket.on('message', data => {
       try {
-        const frame = JSON.parse(data.toString()); this.frames.push(frame);
+        const frame = JSON.parse(data.toString()); this.frames.push(frame); this.screens.accept(frame);
         if (this.frames.length > 20000) throw new Error('WINDOWS_CONSUMER_FRAME_LIMIT');
         if (frame.type === 'snapshot-chunk') {
           this.output += frame.data; this.send({ type: 'snapshot-applied', sessionId: frame.sessionId,
@@ -105,9 +146,13 @@ class Peer {
   request(type, fields = {}) { const requestId = ++this.nextRequest; this.send({ type, requestId, ...fields }); return requestId; }
   async until(predicate, description, milliseconds = 15000) {
     const deadline = Date.now() + milliseconds;
-    while (!await predicate()) {
+    while (true) {
       if (this.error) throw this.error;
       if (this.closed) throw new Error('WINDOWS_CONSUMER_SOCKET_CLOSED: ' + description);
+      const ready = await predicate();
+      if (this.error) throw this.error;
+      if (this.closed) throw new Error('WINDOWS_CONSUMER_SOCKET_CLOSED: ' + description);
+      if (ready) return;
       if (Date.now() >= deadline) throw new Error('WINDOWS_CONSUMER_TIMEOUT: ' + description);
       await pause(20);
     }
@@ -118,9 +163,23 @@ class Peer {
     if (frame.type === 'error') throw new Error('WINDOWS_CONSUMER_OPERATION_FAILED: ' + frame.code);
     return frame;
   }
+  async input(sessionId, leaseId, inputId, data) {
+    const begin = this.frames.length; this.send({ type: 'input', sessionId, leaseId, inputId, data }); let acknowledgment;
+    await this.until(() => (acknowledgment = this.frames.slice(begin).find(frame =>
+      frame.type === 'input-ack' && frame.sessionId === sessionId && frame.leaseId === leaseId && frame.inputId === inputId ||
+      frame.type === 'error' && (frame.sessionId === undefined || frame.sessionId === sessionId) && (frame.inputId === undefined || frame.inputId === inputId))), 'input acknowledgment');
+    if (acknowledgment.type === 'error') throw new Error('WINDOWS_CONSUMER_INPUT_FAILED: ' + acknowledgment.code);
+    if (acknowledgment.disposition !== 'accepted') throw new Error('WINDOWS_CONSUMER_INPUT_NOT_ACCEPTED');
+  }
+  async fixtureDiagnostics(sessionId) {
+    return { ...(await this.screens.diagnostics(sessionId)), inputResults: this.frames.filter(frame => frame.sessionId === sessionId && ['input-ack', 'error'].includes(frame.type))
+      .slice(-16).map(frame => ({ type: frame.type, inputId: Number.isSafeInteger(frame.inputId) ? frame.inputId : null,
+        code: typeof frame.code === 'string' && /^[A-Z0-9_]{1,64}$/.test(frame.code) ? frame.code : null,
+        disposition: ['accepted', 'already-seen'].includes(frame.disposition) ? frame.disposition : null })) };
+  }
   async close() {
-    if (this.closed) return;
-    const closed = once(this.socket, 'close'); this.socket.close(); await closed;
+    if (this.closed) { await this.screens.dispose(); return; }
+    const closed = once(this.socket, 'close'); this.socket.close(); await closed; await this.screens.dispose();
   }
 }
 
@@ -166,7 +225,8 @@ export async function checkWindowsArchive(archive) {
   const scratch = fs.mkdtempSync(path.join(temporary, 'windows-consumer-'));
   const folder = path.join(scratch, top), caller = path.join(scratch, 'different-cwd'), temp = path.join(scratch, 'temp');
   fs.mkdirSync(folder); fs.mkdirSync(caller); fs.mkdirSync(temp);
-  let pid, ownedHost, peer, primaryFailure; const fixturePids = [];
+  const receivedFile = path.join(folder, 'consumer-received-code-units.txt');
+  let pid, ownedHost, peer, fixtureSessionId, fixturePhase = 'startup', primaryFailure; const fixturePids = [];
   const windows = process.env.SystemRoot ?? process.env.SYSTEMROOT;
   assert.match(windows ?? '', /^[A-Za-z]:[\\/]/);
   const powershell = path.join(windows, 'System32/WindowsPowerShell/v1.0/powershell.exe');
@@ -197,16 +257,18 @@ export async function checkWindowsArchive(archive) {
     config.port = server.address().port; await new Promise(resolve => server.close(resolve));
     const script = `[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); [Console]::InputEncoding=[Text.UTF8Encoding]::new($false); ` +
       `[Console]::WriteLine('WINDOWS_READY:'+$PID); while ($null -ne ($line=[Console]::ReadLine())) { ` +
+      `$units=[Text.StringBuilder]::new(); for($i=0;$i -lt $line.Length;$i++){ if($i){[void]$units.Append(',')}; [void]$units.Append([int][char]$line[$i]) }; ` +
+      `[IO.File]::AppendAllText(${quote(receivedFile)},$units.ToString()+[Environment]::NewLine); ` +
       `if ($line -eq 'grid') { [Console]::WriteLine('WINDOWS_GRID:'+ [Console]::WindowWidth +'x'+ [Console]::WindowHeight) } ` +
       `else { [Console]::WriteLine('WINDOWS_ECHO:'+$line) } }`;
     const profile = (id, source) => ({ id, label: id, executable: powershell,
-      args: ['-NoLogo', '-NoProfile', '-EncodedCommand', encoded(source)], projectDirectory: '.', environment: {} });
+      args: ['-NoLogo', '-NoProfile', '-EncodedCommand', encoded(source)], projectDirectory: '.', environment: { PSModulePath: path.join(path.dirname(powershell), 'Modules') } });
     const pidFile = path.join(folder, 'consumer-tree-pids.txt'), exitFile = path.join(folder, 'consumer-root-exit.txt');
     const tree = role => {
       const child = role === 'root' ? 'child' : 'grandchild';
       return `[IO.File]::AppendAllText(${quote(pidFile)}, '${role}:'+$PID+[Environment]::NewLine); ` +
-        (role !== 'grandchild' ? `Start-Process -FilePath ${quote(powershell)} -ArgumentList '-NoLogo','-NoProfile','-EncodedCommand',${quote(encoded(tree(child)))} -WindowStyle Hidden | Out-Null; ` : '') +
-        (role === 'root' ? `[Console]::WriteLine('WINDOWS_TREE_READY'); while (!(Test-Path -LiteralPath ${quote(exitFile)})) { Start-Sleep -Milliseconds 10 }; [Console]::WriteLine('WINDOWS_ROOT_FINAL'); exit 7` : 'while ($true) { Start-Sleep -Milliseconds 100 }');
+        (role !== 'grandchild' ? `Microsoft.PowerShell.Management\\Start-Process -FilePath ${quote(powershell)} -ArgumentList '-NoLogo','-NoProfile','-EncodedCommand',${quote(encoded(tree(child)))} -WindowStyle Hidden; ` : '') +
+        (role === 'root' ? `[Console]::WriteLine('WINDOWS_TREE_READY'); while (![IO.File]::Exists(${quote(exitFile)})) { [Threading.Thread]::Sleep(10) }; [Console]::WriteLine('WINDOWS_ROOT_FINAL'); exit 7` : 'while ($true) { [Threading.Thread]::Sleep(100) }');
     };
     config.launchProfiles.push(profile('consumer-terminal', script), profile('consumer-tree', tree('root')));
     fs.writeFileSync(configFile, JSON.stringify(config, null, 2) + '\n');
@@ -226,7 +288,7 @@ export async function checkWindowsArchive(archive) {
     assert.equal((await fetch(origin + '/api/bootstrap', { headers: { Origin: 'https://example.invalid' } })).status, 403);
     const initial = await bootstrap(); assert.deepEqual(initial.sessions, []);
     const connect = async () => {
-      const connected = new Peer(new WebSocket(`ws://127.0.0.1:${config.port}/api/terminal?token=${initial.token}`, { origin }));
+      const connected = new WindowsConsumerPeer(new WebSocket(`ws://127.0.0.1:${config.port}/api/terminal?token=${initial.token}`, { origin }));
       await connected.until(() => connected.frames.some(frame => frame.type === 'hello'), 'hello');
       await connected.result(connected.request('ready', { protocol: initial.protocol, hostInstanceId: initial.hostInstanceId })); return connected;
     };
@@ -241,20 +303,28 @@ export async function checkWindowsArchive(archive) {
     };
     peer = await connect();
     const started = await peer.result(peer.request('start', { profileId: 'consumer-terminal', cols: 100, rows: 30 }), 'start-result');
-    const id = started.session.id; await attach(peer, id);
-    await peer.until(() => /WINDOWS_READY:\d+/.test(peer.output), 'native readiness');
-    const rootPid = Number(/WINDOWS_READY:(\d+)/.exec(peer.output)[1]); fixturePids.push(rootPid);
+    const id = started.session.id; fixtureSessionId = id; await attach(peer, id);
+    await peer.until(async () => /WINDOWS_READY:\d+/.test(await peer.screens.text(id)), 'native readiness');
+    const rootPid = Number(/WINDOWS_READY:(\d+)/.exec(await peer.screens.text(id))[1]); fixturePids.push(rootPid);
     await assert.rejects(peer.result(peer.request('resize', { sessionId: id, leaseId: crypto.randomUUID(), cols: 90, rows: 25 })), /CONTROL_REQUIRED/);
     let lease = await control(peer, id);
-    peer.send({ type: 'input', sessionId: id, leaseId: lease, inputId: 1, data: 'Unicode-λ界é\r' });
-    await peer.until(() => peer.output.includes('WINDOWS_ECHO:Unicode-λ界é'), 'Unicode input');
+    fixturePhase = 'ascii';
+    await peer.input(id, lease, 1, 'ASCII-probe\r');
+    await peer.until(async () => (await peer.screens.text(id)).includes('WINDOWS_ECHO:ASCII-probe'), 'ASCII input');
+    fixturePhase = 'unicode';
+    await peer.input(id, lease, 2, 'Unicode-λ界é\r');
+    await peer.until(async () => (await peer.screens.text(id)).includes('WINDOWS_ECHO:Unicode-λ界é'), 'Unicode input');
+    assert.deepEqual(fs.readFileSync(receivedFile, 'utf8').trimEnd().split(/\r?\n/).slice(0, 2),
+      ['ASCII-probe', 'Unicode-λ界é'].map(value => value.split('').map(char => char.charCodeAt(0)).join(',')), 'Actual fixture receives exact UTF16 code units');
+    fixturePhase = 'resize';
     await peer.result(peer.request('resize', { sessionId: id, leaseId: lease, cols: 90, rows: 25 }));
-    peer.send({ type: 'input', sessionId: id, leaseId: lease, inputId: 2, data: 'grid\r' });
-    await peer.until(() => peer.output.includes('WINDOWS_GRID:90x25'), 'native resize');
+    await peer.input(id, lease, 3, 'grid\r');
+    await peer.until(async () => (await peer.screens.text(id)).includes('WINDOWS_GRID:90x25'), 'native resize');
     await peer.close(); peer = undefined;
     assert.equal((await bootstrap()).sessions.filter(session => session.processState === 'running').length, 1);
+    fixturePhase = 'reconnect';
     peer = await connect(); await attach(peer, id);
-    await peer.until(() => peer.output.includes('WINDOWS_ECHO:Unicode-λ界é'), 'retained screen');
+    await peer.until(async () => (await peer.screens.text(id)).includes('WINDOWS_ECHO:Unicode-λ界é'), 'retained screen');
     assert.ok(!peer.frames.some(frame => frame.type === 'control' && frame.leaseId), 'Reconnection only observes');
     lease = await control(peer, id);
     const sibling = await peer.result(peer.request('start', { profileId: 'consumer-terminal', cols: 100, rows: 30 }), 'start-result');
@@ -320,9 +390,22 @@ export async function checkWindowsArchive(archive) {
         'controller-job-before-create', 'suspended-host-ack', 'controller-graceful-disposal'] };
     return result;
   } catch (error) {
-    primaryFailure = error; throw error;
+    primaryFailure = error;
+    if (peer && fixtureSessionId) {
+      try {
+        const report = path.join(process.cwd(), '.runtime/verification/windows-terminal-fixture.json');
+        const received = fs.existsSync(receivedFile) && fs.lstatSync(receivedFile).isFile() && !fs.lstatSync(receivedFile).isSymbolicLink() && fs.statSync(receivedFile).size <= 8192
+          ? fs.readFileSync(receivedFile, 'utf8').trimEnd().split(/\r?\n/).map(line => line === '' ? [] : line.split(',').map(Number)) : null;
+        if (received && (received.length > 16 || received.some(line => line.length > 256 || line.some(unit => !Number.isInteger(unit) || unit < 0 || unit > 65535)))) throw new Error('WINDOWS_FIXTURE_UNITS_INVALID');
+        fs.mkdirSync(path.dirname(report), { recursive: true });
+        fs.writeFileSync(report, JSON.stringify({ fixture: 'consumer-terminal', phase: fixturePhase, ...(await peer.fixtureDiagnostics(fixtureSessionId)), receivedUtf16Units: received }, null, 2) + '\n');
+      } catch { primaryFailure = new AggregateError([error, new Error('WINDOWS_FIXTURE_DIAGNOSTIC_FAILED')], 'WINDOWS_CONSUMER_FAILED'); }
+    }
+    throw primaryFailure;
   } finally {
     peer?.socket.terminate();
+    try { await peer?.screens.dispose(); }
+    catch (error) { primaryFailure = new AggregateError([...(primaryFailure === undefined ? [] : [primaryFailure]), error], 'WINDOWS_FIXTURE_SCREEN_CLEANUP_FAILED'); }
     await cleanupWindowsConsumer(scratch, ownedHost, fixturePids, primaryFailure);
   }
 }
