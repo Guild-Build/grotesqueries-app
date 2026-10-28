@@ -267,6 +267,14 @@ test('pinned catalog excludes unknown IDs, external download URLs, duplicate rec
   }
 });
 
+test('Linux kit archives use a portable gzip header and preserve file bytes and modes', () => {
+  const entries = [file('root/launch', '#!/bin/sh\necho ready\n', 0o755), file('root/config.json', '{}\n')];
+  const archive = writeTarGzip(entries);
+  assert.deepEqual([...archive.subarray(0, 10)], [31, 139, 8, 0, 0, 0, 0, 0, 2, 3]);
+  assert.deepEqual(readTarGzip(archive), [...entries].reverse());
+  assert.deepEqual(writeTarGzip([...entries].reverse()), archive);
+});
+
 test('archive writers and readers reject unsafe, duplicate and case-colliding paths', () => {
   for (const name of ['../outside', '/absolute', 'C:/drive', 'folder\\file', 'safe/../outside', 'name.', 'NUL.txt', 'safe//file']) {
     for (const write of [writeZip, writeTarGzip]) assert.throws(() => write([file(name, 'x')]), /unsafe member name/);

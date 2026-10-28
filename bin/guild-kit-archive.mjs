@@ -178,6 +178,8 @@ export function writeTarGzip(input) {
   }
   chunks.push(Buffer.alloc(1024));
   const result = gzipSync(Buffer.concat(chunks), { level: 9 });
+  // Linux kit metadata must not depend on the machine reconstructing the archive.
+  result[9] = 3; // gzip OS: Unix
   if (result.length > ARCHIVE_LIMITS.archive) fail('TAR output size');
   return result;
 }
