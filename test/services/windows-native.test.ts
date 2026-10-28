@@ -5,6 +5,8 @@ import { fork, spawn, spawnSync, type ChildProcess } from 'node:child_process';
 import { once } from 'node:events';
 import test from 'node:test';
 import { posixWindowsPath } from '../../app/helpers/runtime.js';
+import { getProcessSnapshot } from '../../app/services/process-tree.js';
+import { nativeStopFailure, type NativeStopFailure } from '../../lib/local-web/native-command-diagnostics.mjs';
 import { NodePtyLauncher } from '../../app/services/node-pty.js';
 import { compileWindowsConsoleFixture, windowsConsoleFixtureCommand } from '../../bin/windows-console-fixture.mjs';
 import type { PtyHandle } from '../../app/services/pty.js';
@@ -20,8 +22,9 @@ const alive = (pid: number): boolean => {
 type DiagnosticValue = string | number | boolean | null;
 type ErrorRecord = { message: string; stack?: string; code?: string | number | null; signal?: string | null; killed?: boolean;
   stdoutBytes?: number; stderrBytes?: number; diagnostics?: Record<string, DiagnosticValue>; cause?: ErrorRecord };
+type SnapshotProbe = { id: string; queryPassed: boolean; elapsedMs: number; validatedRows?: number; failure?: NativeStopFailure };
 type CaseReport = { name: string; passed: boolean; cleanupVerified: boolean; knownPids: number[];
-  primary?: ErrorRecord; cleanupErrors: ErrorRecord[] };
+  primary?: ErrorRecord; cleanupErrors: ErrorRecord[]; snapshotProbe?: SnapshotProbe };
 function recordError(error: unknown, depth = 0): ErrorRecord {
   const record: ErrorRecord = error instanceof Error
     ? { message: error.message.slice(0, 4096), stack: error.stack?.slice(0, 8192) } : { message: String(error).slice(0, 4096) };
@@ -165,21 +168,35 @@ function exactEnvironmentPreload(directory: string, names: string[]): string {
   return file;
 }
 
-/** Native addons remain mapped until their loading process exits. Only the parent removes that process's fixture. */
-async function isolated(name: string, directory: string): Promise<void> {
-  let environment: NodeJS.ProcessEnv = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
-  if (name === 'minimal-app-environment') {
-    const windows = process.env.SystemRoot ?? process.env.SYSTEMROOT!;
-    const powershell = path.join(windows, 'System32/WindowsPowerShell/v1.0/powershell.exe');
-    const temporary = path.join(directory, '.runtime/tmp'); fs.mkdirSync(temporary, { recursive: true });
-    environment = { PATH: [path.join(windows, 'System32'), path.dirname(powershell)].join(';'), NODE_PATH: '', NODE_OPTIONS: '',
-      WS_NO_BUFFER_UTIL: '1', WS_NO_UTF_8_VALIDATE: '1', TEMP: temporary, TMP: temporary, TMPDIR: posixWindowsPath(temporary) };
-    for (const name of ['SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE', 'COMSPEC', 'PATHEXT', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
-      'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMDATA', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS']) {
-      const value = Object.entries(process.env).find(([key]) => key.toUpperCase() === name)?.[1]; if (value !== undefined) environment[name] = value;
-    }
+function minimalAppEnvironment(directory: string): NodeJS.ProcessEnv {
+  const windows = process.env.SystemRoot ?? process.env.SYSTEMROOT!;
+  const powershell = path.join(windows, 'System32/WindowsPowerShell/v1.0/powershell.exe');
+  const temporary = path.join(directory, '.runtime/tmp'); fs.mkdirSync(temporary, { recursive: true });
+  const environment: NodeJS.ProcessEnv = { PATH: [path.join(windows, 'System32'), path.dirname(powershell)].join(';'), NODE_PATH: '', NODE_OPTIONS: '',
+    WS_NO_BUFFER_UTIL: '1', WS_NO_UTF_8_VALIDATE: '1', TEMP: temporary, TMP: temporary, TMPDIR: posixWindowsPath(temporary) };
+  for (const name of ['SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE', 'COMSPEC', 'PATHEXT', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
+    'PROGRAMFILES', 'PROGRAMFILES(X86)', 'PROGRAMDATA', 'NUMBER_OF_PROCESSORS', 'PROCESSOR_ARCHITECTURE', 'OS']) {
+    const value = Object.entries(process.env).find(([key]) => key.toUpperCase() === name)?.[1]; if (value !== undefined) environment[name] = value;
   }
-  const execArgv = name === 'minimal-app-environment' ? ['--require', exactEnvironmentPreload(directory, Object.keys(environment))] : [];
+  return environment;
+}
+async function snapshotProbe(name: string, read: () => Promise<unknown[]> = () => getProcessSnapshot(5000)): Promise<CaseReport> {
+  const started = performance.now(); let result: SnapshotProbe;
+  try {
+    const rows = await read();
+    result = { id: name.slice('snapshot-probe-'.length), queryPassed: true, elapsedMs: Math.round(performance.now() - started), validatedRows: rows.length };
+  } catch (error) {
+    result = { id: name.slice('snapshot-probe-'.length), queryPassed: false, elapsedMs: Math.round(performance.now() - started), failure: nativeStopFailure(error) };
+  }
+  return { name, passed: true, cleanupVerified: true, knownPids: [], cleanupErrors: [], snapshotProbe: result };
+}
+
+/** Native addons remain mapped until their loading process exits. Only the parent removes that process's fixture. */
+async function isolated(name: string, directory: string, probe?: { environment: NodeJS.ProcessEnv; collect: (value: SnapshotProbe) => void }): Promise<void> {
+  let environment: NodeJS.ProcessEnv = { ...process.env }; delete environment.NODE_TEST_CONTEXT;
+  if (name === 'minimal-app-environment') environment = minimalAppEnvironment(directory);
+  if (probe) environment = probe.environment;
+  const execArgv = name === 'minimal-app-environment' || probe ? ['--require', exactEnvironmentPreload(directory, Object.keys(environment))] : [];
   const child = fork(__filename, ['--windows-native-worker', name, directory], {
     execArgv, env: environment, stdio: ['ignore', 'pipe', 'pipe', 'ipc'], windowsHide: true,
   });
@@ -187,7 +204,7 @@ async function isolated(name: string, directory: string): Promise<void> {
   child.stdout?.on('data', data => { output = (output + data).slice(-65536); });
   child.stderr?.on('data', data => { errors = (errors + data).slice(-65536); });
   child.on('message', value => { if (value && typeof value === 'object' && (value as CaseReport).name === name) report = value as CaseReport; });
-  const timer = setTimeout(() => { timedOut = true; child.kill(); }, workerBudgetMs);
+  const timer = setTimeout(() => { timedOut = true; child.kill(); }, probe ? 7000 + 5000 + 5000 : workerBudgetMs);
   let code: number | null;
   try { [code] = await once(child, 'exit') as [number | null]; }
   finally { clearTimeout(timer); }
@@ -197,6 +214,10 @@ async function isolated(name: string, directory: string): Promise<void> {
     failures.push(...(report?.cleanupErrors ?? []).map(restoredError));
     if (!failures.length) failures.push(new Error((timedOut ? 'WINDOWS_NATIVE_WORKER_TIMEOUT' : 'WINDOWS_NATIVE_WORKER_FAILED') + `: exit ${code}; ${output}${errors}`));
     throw new AggregateError(failures, 'Windows native fixture failed; evidence preserved at ' + directory, { cause: failures[0] });
+  }
+  if (probe) {
+    if (!report.snapshotProbe) throw new Error('WINDOWS_NATIVE_PROBE_REPORT_MISSING');
+    probe.collect(report.snapshotProbe);
   }
   try { fs.rmSync(directory, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 }); }
   catch (error) { throw new Error('WINDOWS_NATIVE_FIXTURE_REMOVE_FAILED: Passed native checks; fixture preserved at ' + directory, { cause: error }); }
@@ -213,7 +234,7 @@ if (worker) {
     throw new Error('WINDOWS_NATIVE_WORKER_DIRECTORY');
   }
   void (async () => {
-    const report: CaseReport = name === 'harness-pass'
+    const report: CaseReport = name.startsWith('snapshot-probe-') ? await snapshotProbe(name) : name === 'harness-pass'
       ? { name, passed: true, cleanupVerified: true, knownPids: [], cleanupErrors: [] }
       : name === 'harness-errors'
         ? { name, passed: false, cleanupVerified: false, knownPids: [], primary: recordError(Object.assign(
@@ -257,10 +278,66 @@ if (worker) {
       assert.equal(fs.readFileSync(preload, 'utf8').includes('owned-private-marker'), false);
     } finally { fs.rmSync(directory, { recursive: true, force: true }); }
   });
+  test('read-only snapshot probe reports bounded outcomes without process rows or native output', async () => {
+    const marker = 'owned-private-row-env-output'; let calls = 0;
+    const success = await snapshotProbe('snapshot-probe-fixture', async () => { calls++; return [{ data: marker }]; });
+    assert.equal(calls, 1); assert.equal(success.snapshotProbe?.validatedRows, 1); assert.equal(success.snapshotProbe?.queryPassed, true);
+    assert.equal(JSON.stringify(success).includes(marker), false); assert.deepEqual(success.knownPids, []);
+    const failure = await snapshotProbe('snapshot-probe-fixture', async () => { throw Object.assign(new Error('STOP_SNAPSHOT_QUERY_FAILED: ' + marker), {
+      code: 'STOP_SNAPSHOT_QUERY_FAILED', stdout: marker, diagnostics: { phase: 'snapshot', kind: 'timeout', elapsedMs: 5001, timeoutMs: 5000,
+        code: null, signal: 'SIGTERM', killed: true, stdoutBytes: 0, stderrBytes: 0 } }); });
+    assert.equal(failure.snapshotProbe?.queryPassed, false); assert.equal(failure.snapshotProbe?.failure?.command?.kind, 'timeout');
+    assert.equal(JSON.stringify(failure).includes(marker), false); assert.equal(failure.cleanupVerified, true);
+  });
   test('Windows natural-exit cleanup and sibling isolation use the exact minimal SEA app environment', { skip, timeout: workerBudgetMs + 5000 },
     () => isolated('minimal-app-environment', fixtureDirectory()));
   test('Windows natural root exit retains child/grandchild ownership and late exit subscribers until verified Stop', { skip, timeout: workerBudgetMs + 5000 },
     () => isolated('natural-exit', fixtureDirectory()));
+  test('read-only Windows snapshot matrix isolates standard OS context without changing cleanup rules', { skip, timeout: 22 * (7000 + 5000 + 5000) }, async () => {
+    const shared = fixtureDirectory(), results: SnapshotProbe[] = [];
+    const reportFile = path.join(process.cwd(), '.runtime/test/windows-snapshot-matrix.json');
+    fs.mkdirSync(path.dirname(reportFile), { recursive: true });
+    const persist = () => fs.writeFileSync(reportFile, JSON.stringify({ readOnly: true, queryTimeoutMs: 5000, maximumVariants: 22, results }, null, 2) + '\n');
+    try {
+      const minimal = minimalAppEnvironment(shared);
+      const inherited: NodeJS.ProcessEnv = { ...process.env, TEMP: minimal.TEMP, TMP: minimal.TMP, TMPDIR: minimal.TMPDIR };
+      delete inherited.NODE_TEST_CONTEXT;
+      const windows = process.env.SystemRoot ?? process.env.SYSTEMROOT!;
+      const identityNames = ['COMPUTERNAME', 'USERNAME', 'USERDOMAIN', 'USERDOMAIN_ROAMINGPROFILE', 'LOGONSERVER', 'HOMEDRIVE', 'HOMEPATH'];
+      const value = (name: string) => Object.entries(process.env).find(([key]) => key.toUpperCase() === name)?.[1];
+      const withNames = (base: NodeJS.ProcessEnv, names: string[]) => {
+        const environment = { ...base }; for (const name of names) { const found = value(name); if (found !== undefined) environment[name] = found; } return environment;
+      };
+      const windowsPath = [windows, path.join(windows, 'System32'), path.join(windows, 'System32/Wbem'), path.join(windows, 'System32/WindowsPowerShell/v1.0')].join(';');
+      const probe = async (id: string, environment: NodeJS.ProcessEnv) => {
+        if (results.length >= 22) throw new Error('WINDOWS_NATIVE_PROBE_LIMIT');
+        let result: SnapshotProbe | undefined;
+        await isolated('snapshot-probe-' + id, fixtureDirectory(), { environment, collect: observed => { result = observed; results.push(observed); persist(); } });
+        if (!result) throw new Error('WINDOWS_NATIVE_PROBE_REPORT_MISSING');
+        console.log('Windows read-only snapshot probe: ' + JSON.stringify(result)); return result;
+      };
+      await probe('minimal-first', minimal);
+      const reference = await probe('inherited-reference', inherited);
+      const identity = await probe('identity-group', withNames(minimal, identityNames));
+      const osPath = await probe('windows-path', { ...minimal, PATH: windowsPath });
+      const both = await probe('identity-and-path', withNames({ ...minimal, PATH: windowsPath }, identityNames));
+      if (identity.queryPassed || both.queryPassed) {
+        const base = identity.queryPassed ? minimal : { ...minimal, PATH: windowsPath };
+        const available = identityNames.filter(name => value(name) !== undefined); let singletonPassed = false;
+        for (const name of available) {
+          const result = await probe('identity-only-' + name.toLowerCase().replaceAll('_', '-'), withNames(base, [name]));
+          singletonPassed ||= result.queryPassed;
+        }
+        if (!singletonPassed) for (const omitted of available) await probe('identity-without-' + omitted.toLowerCase().replaceAll('_', '-'), withNames(base, available.filter(name => name !== omitted)));
+      }
+      if (osPath.queryPassed) {
+        await probe('path-root-only', { ...minimal, PATH: windows + ';' + minimal.PATH });
+        await probe('path-wbem-only', { ...minimal, PATH: minimal.PATH + ';' + path.join(windows, 'System32/Wbem') });
+      }
+      await probe('minimal-last', minimal);
+      assert.equal(reference.queryPassed, true, 'The equal-temp inherited reference must return a complete validated snapshot');
+    } finally { persist(); fs.rmSync(shared, { recursive: true, force: true }); }
+  });
   test('Windows native ReadConsoleW witness receives exact ASCII and Unicode UTF16 input', { skip, timeout: workerBudgetMs + 5000 },
     () => isolated('wide-console', fixtureDirectory()));
   for (const name of ['modules-absent', 'modules-poisoned']) test('Windows private cleanup helper preserves siblings and CLI environment with ' + name,
