@@ -47,19 +47,30 @@ public static class GuildFixtureController {
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool AttachConsole(uint pid);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GenerateConsoleCtrlEvent(uint code,uint group);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetConsoleCtrlHandler(IntPtr handler,bool add);
+  sealed class Invariant : Exception {
+    public readonly string Code;
+    public Invariant(string code) { Code=code; }
+  }
+  static bool WaitOwned(IntPtr process,uint milliseconds) {
+    uint wait=WaitForSingleObject(process,milliseconds);
+    if (wait==0) return true; // WAIT_OBJECT_0
+    if (wait==0x102) return false; // WAIT_TIMEOUT
+    if (wait==0xffffffff) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    throw new Invariant("wait-status");
+  }
   static void Require(bool ok) { if (!ok) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); }
   static void Emit(string nonce,string phase,string payload) { Console.WriteLine("GQ|"+nonce+"|"+phase+"|"+payload); Console.Out.Flush(); }
   static string ReadBoundedLine(int maximum) {
     var line=new StringBuilder();
     while (true) {
-      int next=Console.In.Read(); if (next<0) throw new InvalidOperationException("eof");
+      int next=Console.In.Read(); if (next<0) throw new Invariant("eof");
       if (next==10) return line.ToString();
-      if (line.Length>=maximum || next==13) throw new InvalidOperationException("input-bound");
+      if (line.Length>=maximum || next==13) throw new Invariant("input-bound");
       line.Append((char)next);
     }
   }
   public static void Run(string executable,string directory,string nonce,string fault) {
-    IntPtr job=IntPtr.Zero,block=IntPtr.Zero; Created owned=new Created(); bool released=false;
+    IntPtr job=IntPtr.Zero,block=IntPtr.Zero; Created owned=new Created(); bool released=false; string operation="start";
     try {
       job=CreateJobObject(IntPtr.Zero,null); Require(job!=IntPtr.Zero);
       var limits=new Extended(); limits.basic.flags=0x2000; // JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE only
@@ -68,11 +79,11 @@ public static class GuildFixtureController {
       Emit(nonce,"job-ready","-");
       // Environment stays memory-only: never write credentials into fixture scratch or arguments.
       var prefix=nonce+" env "; var frame=ReadBoundedLine(180000);
-      if (!frame.StartsWith(prefix,StringComparison.Ordinal)) throw new InvalidOperationException("environment-nonce");
+      if (!frame.StartsWith(prefix,StringComparison.Ordinal)) throw new Invariant("environment-nonce");
       var environment=Convert.FromBase64String(frame.Substring(prefix.Length));
       if (environment.Length<4 || environment.Length>131072 || environment.Length%2!=0 ||
         environment[environment.Length-1]!=0 || environment[environment.Length-2]!=0 ||
-        environment[environment.Length-3]!=0 || environment[environment.Length-4]!=0) throw new InvalidOperationException("environment-bound");
+        environment[environment.Length-3]!=0 || environment[environment.Length-4]!=0) throw new Invariant("environment-bound");
       block=Marshal.AllocHGlobal(environment.Length); Marshal.Copy(environment,0,block,environment.Length);
       var startup=new Startup(); startup.cb=Marshal.SizeOf(typeof(Startup)); startup.flags=1; startup.show=0;
       Require(CreateProcess(executable,new StringBuilder("\""+executable+"\""),IntPtr.Zero,IntPtr.Zero,false,
@@ -81,20 +92,19 @@ public static class GuildFixtureController {
       long birth,end,kernel,user; Require(GetProcessTimes(owned.process,out birth,out end,out kernel,out user));
       Emit(nonce,"created",owned.pid.ToString()+","+birth.ToString());
       if (fault=="after-create") Environment.Exit(72); // native containment fault test; host has never executed
-      if (ReadBoundedLine(64)!=nonce+" resume") throw new InvalidOperationException("ack");
-      if (ResumeThread(owned.thread)!=1) throw new InvalidOperationException("resume");
+      if (ReadBoundedLine(64)!=nonce+" resume") throw new Invariant("ack");
+      if (ResumeThread(owned.thread)!=1) throw new Invariant("resume");
       CloseHandle(owned.thread); owned.thread=IntPtr.Zero; Emit(nonce,"resumed","-");
       while (true) {
         var command=ReadBoundedLine(64);
         if (command==nonce+" stop") {
-          uint wait=WaitForSingleObject(owned.process,0);
-          if (wait==0xffffffff) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
-          if (wait!=0) {
+          operation="stop";
+          if (!WaitOwned(owned.process,0)) {
             long current; Require(GetProcessTimes(owned.process,out current,out end,out kernel,out user));
-            if (current!=birth) throw new InvalidOperationException("generation");
+            if (current!=birth) throw new Invariant("generation");
             var image=new StringBuilder(32768); uint length=32768;
             Require(QueryFullProcessImageName(owned.process,0,image,ref length));
-            if (!String.Equals(Path.GetFullPath(image.ToString()),executable,StringComparison.OrdinalIgnoreCase)) throw new InvalidOperationException("image");
+            if (!String.Equals(Path.GetFullPath(image.ToString()),executable,StringComparison.OrdinalIgnoreCase)) throw new Invariant("image");
             FreeConsole(); Require(AttachConsole(owned.pid));
             try {
               Require(SetConsoleCtrlHandler(IntPtr.Zero,true)); // AttachConsole resets handler table
@@ -102,24 +112,29 @@ public static class GuildFixtureController {
             } finally { Require(FreeConsole()); }
           }
           Emit(nonce,"signaled","-");
+          if (!WaitOwned(owned.process,${COMMAND_MS})) throw new Invariant("exit-timeout");
+          Emit(nonce,"stopped","-");
         } else if (command==nonce+" dispose") {
-          if (WaitForSingleObject(owned.process,0)!=0) throw new InvalidOperationException("host-live");
+          operation="dispose";
+          if (!WaitOwned(owned.process,0)) throw new Invariant("host-live");
           var drain=System.Diagnostics.Stopwatch.StartNew();
           while (true) {
             Accounting accounting; Require(QueryInformationJobObject(job,1,out accounting,(uint)Marshal.SizeOf(typeof(Accounting)),IntPtr.Zero));
             if (accounting.active==1) break;
-            if (drain.ElapsedMilliseconds>=4000) throw new InvalidOperationException("job-not-empty");
+            if (drain.ElapsedMilliseconds>=4000) throw new Invariant("job-not-empty");
             System.Threading.Thread.Sleep(20);
           }
           // Only the controller remains. No application process can create new children.
           limits.basic.flags=0; Require(SetInformationJobObject(job,9,ref limits,(uint)Marshal.SizeOf(typeof(Extended))));
           Require(CloseHandle(job)); job=IntPtr.Zero; CloseHandle(owned.process); owned.process=IntPtr.Zero;
           released=true; Emit(nonce,"disposed","-"); return;
-        } else { throw new InvalidOperationException("command"); }
+        } else { throw new Invariant("command"); }
       }
     } catch (Exception error) {
       var native=error as System.ComponentModel.Win32Exception;
-      Emit(nonce,"failure",native==null ? "0" : native.NativeErrorCode.ToString());
+      var invariant=error as Invariant;
+      string detail=native!=null ? "native" : invariant!=null ? invariant.Code : "managed";
+      Emit(nonce,"failure",operation+","+detail+","+(native==null ? "0" : native.NativeErrorCode.ToString(System.Globalization.CultureInfo.InvariantCulture)));
       Environment.Exit(71); // process teardown closes its sole job handle; containment is a FAILED qualification
     } finally {
       if (block!=IntPtr.Zero) Marshal.FreeHGlobal(block);
@@ -157,7 +172,7 @@ const phaseSource = (nonce, phase) => `[Console]::WriteLine(${quote(line(nonce, 
 
 /** Strict receipt channel, also exercised with portable stream fixtures. */
 export function controllerChannel(child, nonce) {
-  let pending = '', bytes = 0, stderrBytes = 0, closed, failure;
+  let pending = '', bytes = 0, stderrBytes = 0, closed, failure, failureReceipt;
   const messages = [], phases = []; const started = Date.now();
   child.stdout.on('data', data => {
     bytes += data.length;
@@ -165,12 +180,23 @@ export function controllerChannel(child, nonce) {
     pending += data.toString('utf8');
     while (pending.includes('\n')) {
       const index = pending.indexOf('\n'), value = pending.slice(0, index).replace(/\r$/, ''); pending = pending.slice(index + 1);
-      const match = /^GQ\|([a-f0-9]{32})\|(started|type-ready|job-ready|created|resumed|signaled|disposed|failure)\|(-|[0-9]+(?:,[0-9]+)?)$/.exec(value);
-      if (!match || match[1] !== nonce || (match[2] === 'created' ? !/^[1-9][0-9]*,[1-9][0-9]*$/.test(match[3]) : match[2] === 'failure' ? !/^\d+$/.test(match[3]) : match[3] !== '-')) {
+      const match = /^GQ\|([a-f0-9]{32})\|(started|type-ready|job-ready|created|resumed|signaled|stopped|disposed|failure)\|([^|\r\n]{1,96})$/.exec(value);
+      const details = match?.[2] === 'failure'
+        ? /^(start|stop|dispose),(native|managed|eof|input-bound|environment-nonce|environment-bound|ack|resume|generation|image|exit-timeout|wait-status|host-live|job-not-empty|command),(-?\d{1,10})$/.exec(match[3])
+        : undefined;
+      const nativeCode = details ? Number(details[3]) : 0;
+      if (!match || match[1] !== nonce || (match[2] === 'created' ? !/^[1-9][0-9]*,[1-9][0-9]*$/.test(match[3])
+        : match[2] === 'failure' ? !details || nativeCode < -2147483648 || nativeCode > 2147483647 || (details[2] !== 'native' && nativeCode !== 0)
+        : match[3] !== '-')) {
         failure = new Error('WINDOWS_CONTROLLER_RECEIPT_INVALID'); continue;
       }
       messages.push({ phase: match[2], payload: match[3] }); phases.push({ phase: match[2], elapsedMs: Date.now() - started });
-      if (match[2] === 'failure') failure = new Error('WINDOWS_CONTROLLER_NATIVE_FAILURE_' + match[3]);
+      if (details) {
+        const [, operation, invariant] = details;
+        failureReceipt = { operation, invariant, nativeCode };
+        const code = `${operation}_${invariant}`.replaceAll('-', '_').toUpperCase();
+        failure = new Error('WINDOWS_CONTROLLER_' + code + (invariant === 'native' && nativeCode >= 0 ? '_' + nativeCode : ''));
+      }
     }
     if (pending.length > 4096) failure = new Error('WINDOWS_CONTROLLER_LINE_LIMIT');
   });
@@ -178,7 +204,7 @@ export function controllerChannel(child, nonce) {
   child.on('error', error => { failure = new Error('WINDOWS_CONTROLLER_SPAWN_FAILED'); failure.code = /^[A-Z_0-9]+$/.test(error.code ?? '') ? error.code : 'UNKNOWN'; });
   child.on('close', (code, signal) => { closed = { code, signal }; if (pending) failure ??= new Error('WINDOWS_CONTROLLER_TRUNCATED_RECEIPT'); });
   const diagnostics = () => ({ phases, elapsedMs: Date.now() - started, stdoutBytes: bytes, stderrBytes, code: closed?.code ?? null, signal: closed?.signal ?? null,
-    timeoutMs: COMMAND_MS, drainTimeoutMs: DRAIN_MS, killed: child.killed === true, spawnCode: failure?.code ?? null });
+    timeoutMs: COMMAND_MS, drainTimeoutMs: DRAIN_MS, killed: child.killed === true, spawnCode: failure?.code ?? null, failure: failureReceipt ?? null });
   function healthy() { if (failure) throw failure; if (closed) throw new Error('WINDOWS_CONTROLLER_UNEXPECTED_EXIT'); }
   async function receive(phase, timeoutMs = COMMAND_MS) {
     const deadline = Date.now() + timeoutMs;
@@ -232,8 +258,6 @@ export async function probeWindowsPowerShell(cwd, environment) {
   return results;
 }
 
-const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) { if (error.code === 'ESRCH') return false; throw error; } };
-
 export async function startOwnedWindowsHost(executable, cwd, environment, { fault, onCreated, reportDirectory = path.join(process.cwd(), '.runtime/verification') } = {}) {
   if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('WINDOWS_HOST_FIXTURE_UNSUPPORTED');
   executable = path.resolve(executable); cwd = path.resolve(cwd);
@@ -271,9 +295,8 @@ export async function startOwnedWindowsHost(executable, cwd, environment, { faul
       if (stopping) return stopping;
       const attempt = (async () => {
         channel.send('stop'); await channel.receive('signaled');
-        const deadline = Date.now() + COMMAND_MS;
-        while (alive(pid)) { channel.healthy(); if (Date.now() >= deadline) throw new Error('WINDOWS_HOST_FIXTURE_SHUTDOWN_TIMEOUT'); await pause(25); }
-        channel.healthy();
+        // A numeric PID lookup can report exit before the retained handle is signaled.
+        await channel.receive('stopped');
       })();
       stopping = attempt; void attempt.catch(() => { if (stopping === attempt) stopping = undefined; }); return attempt;
     }, async dispose() {

@@ -1,6 +1,12 @@
 import type { LaunchProfile } from '@grotesqueries/protocol';
 
-export interface StopResult { exitCode: number; verifiedPids: number[]; cleanupScope?: 'tracked-descendants' }
+export interface StopResult {
+  exitCode: number;
+  verifiedPids: number[];
+  /** Linux reached ECHILD and verified cleanup, but the bounded PID list has omissions. */
+  verifiedPidsTruncated?: true;
+  cleanupScope?: 'tracked-descendants';
+}
 /** Adapter boundary for owned native processes. Cleanup evidence is platform-specific. */
 export interface PtyHandle {
   readonly pid: number;

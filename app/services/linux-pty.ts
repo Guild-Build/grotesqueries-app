@@ -101,8 +101,11 @@ export async function startLinuxPty(root: string, profile: LaunchProfile, cols: 
             if (cleanupRequired) notifyExit();
           } else if (message.type === 'done') {
             if (!Number.isSafeInteger(message.exitCode) || !Array.isArray(message.verifiedPids) || message.verifiedPids.length > 4096 ||
-              message.verifiedPids.some(pid => !Number.isSafeInteger(pid) || Number(pid) <= 1) || !message.verifiedPids.includes(terminal!.pid)) throw new Error('LINUX_CONTROL_INVALID');
-            done = { exitCode: Number(message.exitCode), verifiedPids: message.verifiedPids as number[] }; completeStop();
+              message.verifiedPids.some(pid => !Number.isSafeInteger(pid) || Number(pid) <= 1) || !message.verifiedPids.includes(terminal!.pid) ||
+              (message.verifiedPidsTruncated !== undefined && message.verifiedPidsTruncated !== true)) throw new Error('LINUX_CONTROL_INVALID');
+            done = { exitCode: Number(message.exitCode), verifiedPids: message.verifiedPids as number[],
+              ...(message.verifiedPidsTruncated === true ? { verifiedPidsTruncated: true } : {}) };
+            completeStop();
           } else if (message.type === 'error') {
             fail(typeof message.code === 'string' && /^[A-Z_]{1,64}$/.test(message.code) ? message.code : 'LINUX_CONTROL_INVALID');
           } else throw new Error('LINUX_CONTROL_INVALID');

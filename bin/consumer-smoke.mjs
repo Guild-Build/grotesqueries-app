@@ -190,7 +190,7 @@ export async function consumerSmoke(folder, { disposable = false } = {}) {
     const sibling = await peer.result(peer.request('start', { profileId: 'consumer-fixture', cols: 80, rows: 24 }), 'start-result');
     await peer.result(peer.request('stop', { sessionId, leaseId: nextLease }));
     await peer.until(() => peer.frames.some(frame => frame.type === 'session' && frame.session.id === sessionId &&
-      frame.session.processState === 'exited' && !frame.session.stopPending && frame.session.failureCode !== 'STOP_FAILED'), 'verified Stop');
+      frame.session.processState === 'exited' && !frame.session.stopPending && [null, undefined, 'CLEANUP_SCOPE_LIMITED'].includes(frame.session.failureCode)), 'verified Stop');
     const afterStop = await fetch(origin + '/api/bootstrap').then(response => response.json());
     assert.equal(afterStop.sessions.find(session => session.id === sibling.session.id).processState, 'running', 'Stop leaves sibling alive');
     await peer.close(); peer = undefined;
@@ -207,7 +207,7 @@ export async function consumerSmoke(folder, { disposable = false } = {}) {
       const cleanupLease = await control(peer, descendantId);
       await peer.result(peer.request('stop', { sessionId: descendantId, leaseId: cleanupLease }));
       await peer.until(() => peer.frames.some(frame => frame.type === 'session' && frame.session.id === descendantId &&
-        frame.session.processState === 'exited' && !frame.session.stopPending && frame.session.failureCode !== 'STOP_FAILED'), 'adopted descendant cleanup');
+        frame.session.processState === 'exited' && !frame.session.stopPending && [null, undefined, 'CLEANUP_SCOPE_LIMITED'].includes(frame.session.failureCode)), 'adopted descendant cleanup');
       assert.throws(() => process.kill(pid, 0), error => error.code === 'ESRCH', 'Verified descendant was reaped');
     }
     await peer.close(); peer = undefined;

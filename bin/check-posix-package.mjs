@@ -159,7 +159,7 @@ export async function checkPosixPackage(archive) {
     peer.send({ type: 'input', sessionId, leaseId: lease, inputId: 1, data: 'reconnected-roundtrip\r' });
     await peer.until(() => peer.output.includes('PACKAGE_ECHO:reconnected-roundtrip'), 'same native session after reconnect');
     await peer.result(peer.request('stop', { sessionId, leaseId: lease }));
-    await peer.until(() => peer.frames.some(frame => frame.type === 'session' && frame.session.id === sessionId && frame.session.processState === 'exited' && !frame.session.stopPending && frame.session.failureCode !== 'STOP_FAILED'), 'verified native Stop');
+    await peer.until(() => peer.frames.some(frame => frame.type === 'session' && frame.session.id === sessionId && frame.session.processState === 'exited' && !frame.session.stopPending && [null, undefined, 'CLEANUP_SCOPE_LIMITED'].includes(frame.session.failureCode)), 'verified native Stop');
     socket.close(); await once(socket, 'close'); peer = undefined;
     const exited = once(child, 'exit'); child.kill('SIGTERM'); assert.equal((await exited)[0], 0);
     assert.equal(fs.existsSync(readyFile), false, 'Shutdown removes its ready file');

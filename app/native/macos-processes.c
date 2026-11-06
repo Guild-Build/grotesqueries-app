@@ -98,7 +98,7 @@ int main(int argc, char **argv) {
     printf("\036%s:{\"pid\":%d,\"session\":%d,\"birth\":\"%llu:%llu\"}\037", argv[2], getpid(), getsid(0),
       (unsigned long long)value.pbi_start_tvsec, (unsigned long long)value.pbi_start_tvusec);
     if (fflush(stdout) != 0) return 3;
-    /* No parent acknowledgement means no stop and no exec. A lost handshake self-expires. */
+    /* The host acknowledges only after it retains ownership. A lost handshake self-expires. */
     char acknowledgement[65] = {0}; size_t length = strlen(argv[2]), received = 0;
     struct timespec began, now; clock_gettime(CLOCK_MONOTONIC, &began);
     while (received < length) {
@@ -111,7 +111,7 @@ int main(int argc, char **argv) {
       if (count <= 0) return 3;
       received += (size_t)count;
     }
-    if (memcmp(acknowledgement, argv[2], length) || tcsetattr(STDIN_FILENO, TCSANOW, &saved) != 0 || signal_token(&token, SIGSTOP) != 0) return 3;
+    if (memcmp(acknowledgement, argv[2], length) || tcsetattr(STDIN_FILENO, TCSANOW, &saved) != 0) return 3;
     execv(argv[3], &argv[3]);
     return 127;
   }
@@ -125,12 +125,16 @@ int main(int argc, char **argv) {
     char birth[64]; birth_string(&value, birth, sizeof(birth));
     if (strcmp(birth, argv[3])) { puts("{\"state\":\"replaced\"}"); return 0; }
     pid_t session = getsid((pid_t)pid);
-    if (session <= 0) { puts("{\"state\":\"unavailable\"}"); return 0; }
+    if (session <= 0 || !info((pid_t)pid, &value)) {
+      puts(errno == ESRCH ? "{\"state\":\"exited\"}" : "{\"state\":\"unavailable\"}"); return 0;
+    }
+    birth_string(&value, birth, sizeof(birth));
+    if (strcmp(birth, argv[3])) { puts("{\"state\":\"replaced\"}"); return 0; }
     printf("{\"state\":\"alive\",\"process\":{\"pid\":%u,\"parent\":%u,\"session\":%d,\"birth\":\"%s\",\"zombie\":%s,\"stopped\":%s}}\n",
       value.pbi_pid, value.pbi_ppid, session, birth, value.pbi_status == 5 ? "true" : "false", value.pbi_status == 4 ? "true" : "false");
     return 0;
   }
-  if (argc == 5 && (!strcmp(argv[1], "kill") || !strcmp(argv[1], "resume"))) {
+  if (argc == 5 && !strcmp(argv[1], "kill")) {
     if (!signal_token) return 5;
     char *end = NULL; long pid = strtol(argv[2], &end, 10);
     if (!end || *end || pid <= 1 || pid > INT32_MAX) return 2;
@@ -146,7 +150,7 @@ int main(int argc, char **argv) {
     if (!info((pid_t)pid, &value)) return errno == ESRCH ? 0 : 3;
     birth_string(&value, birth, sizeof(birth));
     if (strcmp(birth, argv[3]) || getsid((pid_t)pid) != session) return 4;
-    int result = signal_token(&token, !strcmp(argv[1], "resume") ? SIGCONT : SIGKILL);
+    int result = signal_token(&token, SIGKILL);
     if (result != 0 && result != ESRCH) return 3;
     return 0;
   }

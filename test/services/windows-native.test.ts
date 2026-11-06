@@ -21,7 +21,7 @@ type DiagnosticValue = string | number | boolean | null;
 type ErrorRecord = { message: string; stack?: string; code?: string | number | null; signal?: string | null; killed?: boolean;
   stdoutBytes?: number; stderrBytes?: number; diagnostics?: Record<string, DiagnosticValue>; cause?: ErrorRecord };
 type CaseReport = { name: string; passed: boolean; cleanupVerified: boolean; knownPids: number[];
-  primary?: ErrorRecord; cleanupErrors: ErrorRecord[] };
+  primary?: ErrorRecord; cleanupErrors: ErrorRecord[]; wideConsole?: Record<string, DiagnosticValue> };
 function recordError(error: unknown, depth = 0): ErrorRecord {
   const record: ErrorRecord = error instanceof Error
     ? { message: error.message.slice(0, 4096), stack: error.stack?.slice(0, 8192) } : { message: String(error).slice(0, 4096) };
@@ -66,6 +66,7 @@ async function launch(source: string, directory: string, stopTree?: ConstructorP
 async function exercise(name: string, directory: string): Promise<CaseReport> {
   let pty: PtyHandle | undefined, sibling: ChildProcess | undefined, siblingExited: Promise<unknown> | undefined;
   let primary: ErrorRecord | undefined, cleanupVerified = false, injectedFailure = false;
+  let wideConsole: CaseReport['wideConsole'];
   const cleanupErrors: ErrorRecord[] = [], knownPids: number[] = [];
   const originalModules = Object.entries(process.env).filter(([key]) => key.toUpperCase() === 'PSMODULEPATH');
   try {
@@ -110,14 +111,36 @@ async function exercise(name: string, directory: string): Promise<CaseReport> {
       const library = compileWindowsConsoleFixture(directory, powershell, process.env), record = path.join(directory, 'wide-units.txt');
       const command = windowsConsoleFixtureCommand(library, record);
       pty = await launch('', directory, undefined, { executable: powershell, args: ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(command, 'utf16le').toString('base64')] });
-      knownPids.push(pty.pid); let output = ''; pty.onOutput(data => { output += data; });
-      await until(() => output.includes('WINDOWS_READY:'), 'wide console readiness');
-      pty.write('ASCII-probe\r');
-      await until(() => fs.existsSync(record) && fs.readFileSync(record, 'utf8').trimEnd().split('\n').length === 1, 'ASCII wide console input');
-      pty.write('Unicode-λ界é\r');
-      await until(() => fs.readFileSync(record, 'utf8').trimEnd().split('\n').length === 2, 'Unicode wide console input');
-      assert.deepEqual(fs.readFileSync(record, 'utf8').trimEnd().split('\n'), ['ASCII-probe', 'Unicode-λ界é'].map(value => value.split('').map(char => char.charCodeAt(0)).join(',')));
-      await pty.stop();
+      knownPids.push(pty.pid);
+      let output = '', exitCode: number | undefined, stage = 'readiness';
+      pty.onOutput(data => { output = (output + data).slice(-4096); });
+      pty.onExit(code => { exitCode = code; });
+      const content = () => fs.existsSync(record) ? fs.readFileSync(record, 'utf8') : '';
+      const completeLines = (value: string) => value.split('\n').slice(0, -1);
+      const stillRunning = () => assert.equal(exitCode, undefined, 'Wide console witness exited before ' + stage);
+      try {
+        await until(() => { stillRunning(); return output.includes('WINDOWS_READY:'); }, 'wide console readiness');
+        const probes = ['ASCII-probe', 'Unicode-λ界é'];
+        for (const [index, value] of probes.entries()) {
+          stage = index === 0 ? 'ASCII' : 'Unicode';
+          pty.write(value + '\r');
+          await until(() => {
+            stillRunning();
+            return completeLines(content()).length >= index + 1;
+          }, stage + ' wide console input');
+          assert.deepEqual(completeLines(content()), probes.slice(0, index + 1)
+            .map(probe => probe.split('').map(char => char.charCodeAt(0)).join(',')));
+        }
+        stage = 'Stop';
+        await pty.stop();
+      } catch (error) {
+        const value = content(), modes = /WINDOWS_INPUT_MODE:(\d+):(\d+)/.exec(output);
+        wideConsole = { stage, exitCode: exitCode ?? null, ready: output.includes('WINDOWS_READY:'),
+          inputModeBefore: modes ? Number(modes[1]) : null, inputModeAfter: modes ? Number(modes[2]) : null,
+          recordExists: fs.existsSync(record), recordBytes: Buffer.byteLength(value), completeRows: completeLines(value).length,
+          asciiEcho: output.includes('WINDOWS_ECHO:ASCII-probe'), unicodeEcho: output.includes('WINDOWS_ECHO:Unicode-λ界é') };
+        throw error;
+      }
     } else if (name === 'modules-absent' || name === 'modules-poisoned') {
       for (const key of Object.keys(process.env)) if (key.toUpperCase() === 'PSMODULEPATH') delete process.env[key];
       const expected = name === 'modules-poisoned' ? path.join(directory, 'missing-pwsh7-modules') : null;
@@ -146,7 +169,8 @@ async function exercise(name: string, directory: string): Promise<CaseReport> {
   }
   for (const key of Object.keys(process.env)) if (key.toUpperCase() === 'PSMODULEPATH') delete process.env[key];
   for (const [key, value] of originalModules) process.env[key] = value;
-  return { name, passed: !primary && !cleanupErrors.length && cleanupVerified, cleanupVerified, knownPids, primary, cleanupErrors };
+  return { name, passed: !primary && !cleanupErrors.length && cleanupVerified, cleanupVerified, knownPids, primary, cleanupErrors,
+    ...(wideConsole ? { wideConsole } : {}) };
 }
 
 /** Node/libuv restores some missing Windows identity variables during process creation.

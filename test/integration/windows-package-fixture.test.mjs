@@ -33,6 +33,24 @@ test('controller receipts require exact nonce, grammar and requested phase; boun
   await assert.rejects(channel.receive('created', 20), /PHASE_created/);
 });
 
+test('controller separates Stop signaling from retained-handle exit and preserves only typed failures', async () => {
+  const pending = fake();
+  pending.child.stdout.write(receipt('signaled'));
+  await pending.channel.receive('signaled');
+  await assert.rejects(pending.channel.receive('stopped', 15), /TIMEOUT_stopped/);
+  pending.child.stdout.write(receipt('stopped'));
+  await pending.channel.receive('stopped');
+  const failed = fake();
+  failed.child.stdout.write(receipt('failure', 'dispose,job-not-empty,0'));
+  await assert.rejects(failed.channel.receive('disposed'), /DISPOSE_JOB_NOT_EMPTY/);
+  assert.deepEqual(failed.channel.diagnostics().failure, { operation: 'dispose', invariant: 'job-not-empty', nativeCode: 0 });
+  for (const payload of ['0', 'stop,unknown,0', 'start,managed,5', 'stop,native,2147483648']) {
+    const invalid = fake(); invalid.child.stdout.write(receipt('failure', payload));
+    await assert.rejects(invalid.channel.receive('stopped'), /RECEIPT_INVALID/);
+    assert.equal(invalid.channel.diagnostics().failure, null);
+  }
+});
+
 test('controller command ack is nonce-bound and final receipt requires successful close and drained output', async () => {
   const { child, channel } = fake(); let command = ''; child.stdin.on('data', data => { command += data; });
   child.stdout.write(receipt('created', '123,134000000000000000'));
@@ -87,6 +105,7 @@ async function fixture(run) {
   const root = path.join(process.cwd(), '.runtime/tmp'); fs.mkdirSync(root, { recursive: true });
   const scratch = fs.mkdtempSync(path.join(root, 'windows-package-fixture-')), cwd = path.join(scratch, 'relocated 世界 app');
   fs.mkdirSync(cwd); const marker = path.join(cwd, 'app-started.txt');
+  const handled = path.join(cwd, 'interrupt-received.txt'), release = path.join(cwd, 'interrupt-release.txt');
   const windows = process.env.SystemRoot ?? process.env.SYSTEMROOT;
   const powershell = path.join(windows, 'System32/WindowsPowerShell/v1.0/powershell.exe'), exe = path.join(cwd, 'grotesqueries.exe');
   const allowed = new Set(['SYSTEMROOT', 'WINDIR', 'SYSTEMDRIVE', 'COMSPEC', 'PATHEXT', 'USERPROFILE', 'APPDATA', 'LOCALAPPDATA',
@@ -94,7 +113,26 @@ async function fixture(run) {
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => allowed.has(key.toUpperCase())));
   env.GUILD_FIXTURE_SECRET_MARKER = 'owned-test-marker-never-a-real-secret';
   env.GUILD_FIXTURE_STARTED = marker; env.PATH = path.join(windows, 'System32');
-  const source = 'using System; using System.IO; public class OwnedFixture { public static void Main() { File.WriteAllText(Environment.GetEnvironmentVariable("GUILD_FIXTURE_STARTED"),(Environment.GetEnvironmentVariable("PSModulePath")??"absent")+"|"+(Environment.GetEnvironmentVariable("GUILD_FIXTURE_SECRET_MARKER")!=null?"present":"missing")); while(true) System.Threading.Thread.Sleep(100); } }';
+  env.GUILD_FIXTURE_INTERRUPT_RECEIVED = handled; env.GUILD_FIXTURE_INTERRUPT_RELEASE = release;
+  const source = `
+using System;
+using System.IO;
+using System.Threading;
+public class OwnedFixture {
+  static volatile bool released;
+  public static void Main() {
+    Console.CancelKeyPress += delegate(object sender, ConsoleCancelEventArgs args) {
+      args.Cancel = true;
+      File.WriteAllText(Environment.GetEnvironmentVariable("GUILD_FIXTURE_INTERRUPT_RECEIVED"), "received");
+      while (!File.Exists(Environment.GetEnvironmentVariable("GUILD_FIXTURE_INTERRUPT_RELEASE"))) Thread.Sleep(20);
+      released = true;
+    };
+    File.WriteAllText(Environment.GetEnvironmentVariable("GUILD_FIXTURE_STARTED"),
+      (Environment.GetEnvironmentVariable("PSModulePath") ?? "absent") + "|" +
+      (Environment.GetEnvironmentVariable("GUILD_FIXTURE_SECRET_MARKER") != null ? "present" : "missing"));
+    while (!released) Thread.Sleep(20);
+  }
+}`;
   const quote = value => "'" + value.replaceAll("'", "''") + "'";
   const script = `$ErrorActionPreference='Stop'; Microsoft.PowerShell.Utility\\Add-Type -TypeDefinition ${quote(source)} -OutputAssembly ${quote(exe)} -OutputType ConsoleApplication`;
   let host, passed = false;
@@ -102,15 +140,15 @@ async function fixture(run) {
     try { execFileSync(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')],
       { cwd, env: { ...env, PSModulePath: path.join(path.dirname(powershell), 'Modules') }, windowsHide: true, stdio: 'pipe', timeout: 30000 }); }
     catch (error) { throw new Error('WINDOWS_FIXTURE_COMPILE_FAILED: ' + JSON.stringify({ code: error.code, signal: error.signal, status: error.status })); }
-    await run({ cwd, marker, exe, env, own: value => { host = value; } }); passed = true;
+    await run({ cwd, marker, handled, release, exe, env, own: value => { host = value; } }); passed = true;
   } finally {
-    if (host) { try { await host.stop(); await host.dispose(); } catch (error) { await host.abort(); throw error; } }
+    if (host) { try { if (!fs.existsSync(release)) fs.writeFileSync(release, 'release'); await host.stop(); await host.dispose(); } catch (error) { await host.abort(); throw error; } }
     if (passed) fs.rmSync(scratch, { recursive: true, force: true, maxRetries: 8, retryDelay: 100 });
     else console.error('Windows fixture evidence retained at ' + cwd);
   }
 }
 
-test('native controller preserves app environment, delivers real console Ctrl+C and disposes only after graceful exit', { skip: !native }, async () => fixture(async ({ cwd, marker, exe, env, own }) => {
+test('native controller waits for actual process exit even when the PID probe reports ESRCH', { skip: !native }, async t => fixture(async ({ cwd, marker, handled, release, exe, env, own }) => {
   const host = await startOwnedWindowsHost(exe, cwd, env, { reportDirectory: cwd }); own(host);
   await until(() => fs.existsSync(marker)); assert.equal(fs.readFileSync(marker, 'utf8'), 'absent|present');
   assert.ok(fs.readdirSync(cwd).every(file => !file.endsWith('.env')));
@@ -119,7 +157,27 @@ test('native controller preserves app environment, delivers real console Ctrl+C 
     assert.equal(bytes.includes(Buffer.from(env.GUILD_FIXTURE_SECRET_MARKER)), false);
     assert.equal(bytes.includes(Buffer.from(env.GUILD_FIXTURE_SECRET_MARKER, 'utf16le')), false);
   }
-  await host.stop(); assert.equal(alive(host.pid), false); await host.dispose(); await host.dispose();
+  const originalKill = process.kill;
+  t.mock.method(process, 'kill', (pid, signal) => {
+    if (pid === host.pid && signal === 0) throw Object.assign(new Error('synthetic ESRCH'), { code: 'ESRCH' });
+    return originalKill.call(process, pid, signal);
+  });
+  let settled = false;
+  const stopping = host.stop();
+  void stopping.then(() => { settled = true; }, () => { settled = true; });
+  try {
+    await until(() => fs.existsSync(handled));
+    // Outlast the controller's post-signal delay so a PID-only Stop would already settle.
+    await pause(650);
+    assert.equal(settled, false, 'Stop still awaits the process handle while the signal handler is held');
+  } finally {
+    fs.writeFileSync(release, 'release');
+    t.mock.restoreAll();
+  }
+  await stopping; await host.dispose(); await host.dispose();
+  const reportFile = fs.readdirSync(cwd).find(name => name.startsWith('windows-controller-'));
+  const { phases } = JSON.parse(fs.readFileSync(path.join(cwd, reportFile), 'utf8'));
+  assert.deepEqual(phases.slice(-3).map(({ phase }) => phase), ['signaled', 'stopped', 'disposed']);
 }));
 
 test('native controller death immediately after suspended creation contains the unacknowledged host', { skip: !native }, async () => fixture(async ({ cwd, marker, exe, env }) => {

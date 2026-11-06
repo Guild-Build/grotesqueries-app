@@ -10,7 +10,11 @@ using System.IO;
 using System.Text;
 using System.Runtime.InteropServices;
 public static class GuildWideConsoleFixture {
+  const uint EnableProcessedInput=0x0001;
+  const uint EnableLineInput=0x0002;
   [DllImport("kernel32.dll")] static extern IntPtr GetStdHandle(int kind);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetConsoleMode(IntPtr input,out uint mode);
+  [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetConsoleMode(IntPtr input,uint mode);
   [DllImport("kernel32.dll", EntryPoint="ReadConsoleW", CharSet=CharSet.Unicode, SetLastError=true)]
   static extern bool ReadConsole(IntPtr input,[Out] StringBuilder buffer,uint length,out uint read,IntPtr control);
   [DllImport("kernel32.dll", EntryPoint="WriteConsoleW", CharSet=CharSet.Unicode, SetLastError=true)]
@@ -25,10 +29,20 @@ public static class GuildWideConsoleFixture {
     }
   }
   public static void Run(string record) {
+    IntPtr input=GetStdHandle(-10);
+    uint previousMode, currentMode;
+    if (!GetConsoleMode(input,out previousMode) ||
+        !SetConsoleMode(input,previousMode|EnableProcessedInput|EnableLineInput) ||
+        !GetConsoleMode(input,out currentMode))
+      throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    if ((currentMode&(EnableProcessedInput|EnableLineInput))!=(EnableProcessedInput|EnableLineInput))
+      throw new InvalidOperationException("WINDOWS_WIDE_CONSOLE_LINE_MODE_UNAVAILABLE");
+    // This witness records one ReadConsoleW return per entered line.
+    WriteLine("WINDOWS_INPUT_MODE:"+previousMode.ToString()+":"+currentMode.ToString());
     WriteLine("WINDOWS_READY:"+System.Diagnostics.Process.GetCurrentProcess().Id.ToString());
     while (true) {
       var buffer=new StringBuilder(512); uint read;
-      if (!ReadConsole(GetStdHandle(-10),buffer,512,out read,IntPtr.Zero))
+      if (!ReadConsole(input,buffer,512,out read,IntPtr.Zero))
         throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
       if (read==0) return;
       string line=buffer.ToString(0,(int)read).TrimEnd('\r','\n');

@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import type { LaunchProfile } from '@grotesqueries/protocol';
 import type { PtyHandle, StopResult } from './pty.js';
 import { assertManagedPath, createChildEnvironment } from '../helpers/runtime.js';
-import { MacProcessOwnership, verifyMacProcessSupport, abortMacBootstrap, macProcessHelperPath, type MacBootstrapIdentity } from './mac-processes.js';
+import { MacProcessOwnership, verifyMacProcessSupport, macProcessHelperPath, type MacBootstrapIdentity } from './mac-processes.js';
 
 export async function startMacPty(root: string, profile: LaunchProfile, cols: number, rows: number, sessionId: string): Promise<PtyHandle> {
   if (!Number.isSafeInteger(cols) || !Number.isSafeInteger(rows) || cols < 2 || cols > 300 || rows < 1 || rows > 200) throw new Error('INVALID_GRID');
@@ -26,7 +26,7 @@ export async function startMacPty(root: string, profile: LaunchProfile, cols: nu
   let bootstrapReject!: (error: Error) => void;
   const bootstrap = new Promise<MacBootstrapIdentity>((resolve, reject) => { bootstrapResolve = resolve; bootstrapReject = reject; });
   const startupTimer = setTimeout(() => bootstrapReject(new Error('PTY_BOOTSTRAP_TIMEOUT')), 2000);
-  // The native child reports its own identity before stopping. Never infer ownership from a later PID lookup.
+  // The native child reports its identity before waiting for permission to run.
   terminal.onData(data => {
     if (!identity) {
       header += data;
@@ -48,30 +48,29 @@ export async function startMacPty(root: string, profile: LaunchProfile, cols: nu
     bootstrapReject(new Error('PTY_BOOTSTRAP_EXITED'));
     cleanupRequired = ownership?.remaining() ?? true; for (const callback of exits) callback(exitCode, cleanupRequired); });
   try {
-    const expected = await bootstrap;
-    terminal.write(nonce);
-    ownership = new MacProcessOwnership(root, terminal.pid, expected);
+    ownership = new MacProcessOwnership(root, terminal.pid, await bootstrap);
   } catch {
-    // A missing handshake is not authority to signal whichever process now occupies the numeric PID.
-    if (exitCode === undefined) {
-      if (!identity) throw new Error('PTY_BOOTSTRAP_FAILED: Initial identity was not received. The unacknowledged bootstrap exits without running the requested program.');
-      try { abortMacBootstrap(root, terminal.pid, identity); }
-      catch { throw new Error('PTY_BOOTSTRAP_CLEANUP_UNVERIFIED: The captured bootstrap identity could not be cleaned up.'); }
-    }
+    // Without acknowledgement, the native helper exits on its own and never runs the requested program.
     throw new Error('PTY_OWNERSHIP_FAILED: Native process ownership could not be established.');
   } finally { clearTimeout(startupTimer); }
   let stopping: Promise<StopResult> | undefined;
-  let resumed = false;
-  let cancelledBeforeResume = false;
+  let acknowledged = false;
+  let cancelled = false;
+  const activate = () => {
+    if (cancelled || exitCode !== undefined) throw new Error('SESSION_EXITED');
+    if (acknowledged) return;
+    terminal.write(nonce);
+    acknowledged = true;
+  };
   const handle: PtyHandle = {
     pid: terminal.pid, cleanupScope: 'tracked-descendants',
-    write: data => { if (exitCode !== undefined) throw new Error('SESSION_EXITED'); terminal.write(data); },
+    write: data => { activate(); terminal.write(data); },
     resize: (columns, lines) => { if (exitCode !== undefined) throw new Error('SESSION_EXITED'); terminal.resize(columns, lines); },
     pause: () => { if (!stopping) terminal.pause(); }, resume: () => terminal.resume(),
     onOutput: callback => { output.add(callback); return () => { output.delete(callback); }; },
     onExit: callback => { exits.add(callback); if (exitCode !== undefined) queueMicrotask(() => { if (exits.has(callback)) callback(exitCode!, cleanupRequired); }); return () => { exits.delete(callback); }; },
     stop: () => {
-      if (!resumed) cancelledBeforeResume = true;
+      cancelled = true;
       if (stopping) return stopping;
       terminal.resume();
       const attempt = (async () => {
@@ -86,9 +85,10 @@ export async function startMacPty(root: string, profile: LaunchProfile, cols: nu
     },
   };
   setImmediate(() => {
-    if (cancelledBeforeResume) return;
-    try { ownership!.resume(); resumed = true; }
-    catch { cleanupRequired = true; void handle.stop().catch(() => { /* Retained ownership permits deliberate cleanup retry. */ }); }
+    if (cancelled || exitCode !== undefined) return;
+    // Start returns ownership before the CLI can produce its first output.
+    try { activate(); }
+    catch { void handle.stop().catch(() => { /* The host retains ownership for a deliberate retry. */ }); }
   });
   return handle;
 }

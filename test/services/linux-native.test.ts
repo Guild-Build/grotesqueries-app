@@ -104,6 +104,39 @@ test('Linux retains root-exited ownership and adopts rapid double-forked setsid 
   } finally { await stop(fixture.pty); }
 });
 
+test('Linux Stop cleans descendants beyond its bounded receipt and preserves an unrelated sibling', { skip, timeout: 15000 }, async () => {
+  const directory = scratchDirectory('linux-receipt-cap-');
+  const helper = path.join(directory, 'dist/native/linux-supervisor');
+  fs.mkdirSync(path.dirname(helper), { recursive: true });
+  // Use the production supervisor with a smaller receipt, not a mock cleanup implementation.
+  execFileSync('/usr/bin/cc', ['-std=c11', '-Wall', '-Wextra', '-Werror', '-O2', '-DMAX_PIDS=4',
+    path.join(root, 'app/native/linux-supervisor.c'), '-o', helper]);
+  const command = 'pids=""; for i in 1 2 3 4 5 6; do sleep 10 & pids="$pids $!"; done; printf "CHILDREN:%s\\n" "$pids"; wait';
+  const sibling = spawn('/bin/sleep', ['10'], { stdio: 'ignore' });
+  const siblingExit = new Promise(resolve => sibling.once('exit', resolve));
+  let pty: PtyHandle | undefined;
+  try {
+    pty = await startLinuxPty(directory, profile(directory, '/bin/sh', ['-c', command]), 100, 30, 'receipt-cap');
+    let output = '';
+    pty.onOutput(data => { output += data; });
+    await until(() => /CHILDREN:[\d ]+\r?\n/.test(output), 'owned fixture children');
+    const children = /CHILDREN:([\d ]+)/.exec(output)![1].trim().split(' ').map(Number);
+    assert.equal(children.length, 6);
+    assert.ok(children.every(alive));
+    const result = await pty.stop();
+    assert.equal(result.exitCode, 137);
+    assert.equal(result.verifiedPids.length, 4);
+    assert.equal(result.verifiedPidsTruncated, true);
+    assert.ok(result.verifiedPids.includes(pty.pid));
+    assert.ok(children.every(pid => !alive(pid)));
+    assert.equal(alive(sibling.pid!), true);
+  } finally {
+    sibling.kill('SIGTERM');
+    await siblingExit;
+    await pty?.stop();
+  }
+});
+
 test('Linux Stop failure retains its supervisor and permits deliberate retry', {
   skip: skip || spawnSync('prlimit', ['--version'], { stdio: 'ignore' }).status !== 0, timeout: 15000,
 }, async () => {

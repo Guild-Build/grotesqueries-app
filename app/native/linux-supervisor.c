@@ -20,7 +20,10 @@
 #include <time.h>
 #include <unistd.h>
 
+#ifndef MAX_PIDS
 #define MAX_PIDS 4096
+#endif
+_Static_assert(MAX_PIDS >= 2 && MAX_PIDS <= 4096, "PID receipt capacity");
 #define CHILD_BYTES 65536
 static volatile sig_atomic_t interrupted;
 static pid_t primary;
@@ -29,6 +32,7 @@ static int control = -1;
 static int start_gate = -1;
 static pid_t verified[MAX_PIDS];
 static size_t verified_count;
+static int verified_truncated;
 
 static void stop_signal(int sig) { (void)sig; interrupted = 1; }
 static int64_t now_ms(void) {
@@ -51,11 +55,11 @@ static void send_error(const char *code) {
   snprintf(line, sizeof(line), "{\"type\":\"error\",\"code\":\"%s\"}\n", code);
   (void)send_text(line);
 }
-static int remember(pid_t pid) {
-  for (size_t i = 0; i < verified_count; i++) if (verified[i] == pid) return 0;
-  if (verified_count == MAX_PIDS) return -1;
+static void remember(pid_t pid) {
+  for (size_t i = 0; i < verified_count; i++) if (verified[i] == pid) return;
+  /* ECHILD proves cleanup. The PID list supplements that proof and must not gate signaling. */
+  if (verified_count == MAX_PIDS) { verified_truncated = 1; return; }
   verified[verified_count++] = pid;
-  return 0;
 }
 static int pidfd(pid_t pid) { return (int)syscall(SYS_pidfd_open, pid, 0); }
 static int signal_fd(int fd, int sig) { return (int)syscall(SYS_pidfd_send_signal, fd, sig, NULL, 0); }
@@ -91,7 +95,7 @@ static int kill_direct_children(void) {
     pid_t child = (pid_t)value;
     int descriptor_pid = pidfd(child);
     if (descriptor_pid < 0) return -1;
-    if (remember(child)) { close(descriptor_pid); return -1; }
+    remember(child);
     int result = signal_fd(descriptor_pid, SIGKILL);
     int error = errno;
     close(descriptor_pid);
@@ -126,8 +130,10 @@ static int finish(void) {
     if (length < 0 || (size_t)length >= sizeof(line) - used) return -1;
     used += (size_t)length;
   }
-  if (used + 4 >= sizeof(line)) return -1;
-  memcpy(line + used, "]}\n", 4);
+  const char *suffix = verified_truncated ? "],\"verifiedPidsTruncated\":true}\n" : "]}\n";
+  size_t suffix_size = strlen(suffix) + 1;
+  if (used + suffix_size > sizeof(line)) return -1;
+  memcpy(line + used, suffix, suffix_size);
   return send_text(line);
 }
 static int connect_control(const char *file) {
@@ -167,7 +173,8 @@ static int launch(char **arguments) {
   close(gate[0]); start_gate = gate[1];
   if (setpgid(primary, primary) && errno != EACCES && errno != ESRCH) return -1;
   (void)tcsetpgrp(STDIN_FILENO, primary);
-  return remember(primary);
+  remember(primary);
+  return 0;
 }
 
 int main(int argc, char **argv) {
@@ -184,7 +191,7 @@ int main(int argc, char **argv) {
     send_error("LINUX_SUPERVISION_UNAVAILABLE"); return 70;
   }
   close(descriptor);
-  if (remember(getpid())) return 70;
+  remember(getpid());
   char hello[256];
   snprintf(hello, sizeof(hello), "{\"type\":\"hello\",\"token\":\"%s\",\"pid\":%ld}\n", argv[2], (long)getpid());
   if (send_text(hello)) return 70;
