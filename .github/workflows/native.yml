@@ -13,13 +13,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-15-intel]
+        os: [ubuntu-22.04, ubuntu-22.04-arm, macos-15, macos-15-intel]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
       - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
         with:
           node-version: 24.14.1
@@ -30,6 +31,9 @@ jobs:
       - run: npm test
       - run: node bin/package-posix.mjs
       - run: npm run check:package:posix
+      - name: Stage standalone macOS consumer test
+        if: runner.os == 'macOS'
+        run: cp bin/consumer-smoke.mjs dist/posix/consumer-smoke.mjs
       - name: Clean Linux runtime filesystems
         if: runner.os == 'Linux'
         run: node bin/check-clean-linux.mjs dist/posix/*.tar.gz
@@ -48,6 +52,7 @@ jobs:
           path: |
             dist/guild-kits/*.assembly.json
             dist/guild-kits/*.qualification.json
+            dist/guild-kits/*.failure.json
             dist/guild-kits/*.sha256
           if-no-files-found: error
           retention-days: 1
@@ -57,6 +62,7 @@ jobs:
           path: |
             dist/posix/*.tar.gz
             dist/posix/*.sha256
+            dist/posix/consumer-smoke.mjs
           if-no-files-found: error
           retention-days: 1
           compression-level: 0
@@ -68,3 +74,38 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 1
+
+  mac-consumer:
+    name: Fresh macOS artifact consumer (${{ matrix.os }})
+    needs: source
+    if: ${{ !cancelled() }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: unsigned-candidate-${{ matrix.os }}
+      - name: Verify archive and launch its bundled runtime
+        env:
+          EXPECTED_SOURCE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          set -euo pipefail
+          archives=(grotesqueries-*-darwin-*.tar.gz)
+          [[ ${#archives[@]} -eq 1 ]]
+          archive=${archives[0]}
+          shasum -a 256 -c "$archive.sha256"
+          mkdir 'clean app'
+          tar -xzf "$archive" -C 'clean app'
+          folder="$PWD/clean app/${archive%.tar.gz}"
+          "$folder/bin/node" consumer-smoke.mjs "$folder" --disposable | tee consumer-macos.json
+          "$folder/bin/node" -e 'const proof = require("./consumer-macos.json"); if (!proof.consumerChecked || proof.sourceRevision !== process.env.EXPECTED_SOURCE_REVISION || proof.sourceDirty) process.exit(1)'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: evidence-macos-${{ matrix.os }}
+          path: consumer-macos.json
+          if-no-files-found: error
+          retention-days: 7

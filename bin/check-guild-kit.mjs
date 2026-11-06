@@ -243,6 +243,7 @@ export async function checkGuildKit(archive, { runtimeArchive, claude, outputDir
   const powershell = process.platform === 'win32' ? path.join(windows, 'System32/WindowsPowerShell/v1.0/powershell.exe') : undefined;
   const launcher = path.join(folder, process.platform === 'win32' ? 'grotesqueries.exe' : 'grotesqueries');
   let host, child, peer, primaryFailure, cleaned = false; const checks = ['runtime-files-unchanged', 'preset-integrity'];
+  let phase = 'SETUP';
   try {
     fixtureCLI(folder, tools, recordFile, environment, powershell);
     const options = { cwd: scratch, env: environment };
@@ -258,6 +259,7 @@ export async function checkGuildKit(archive, { runtimeArchive, claude, outputDir
     }
     const server = net.createServer(); server.listen(0, '127.0.0.1'); await once(server, 'listening'); configuration.port = server.address().port;
     await new Promise(resolve => server.close(resolve)); fs.writeFileSync(configurationFile, JSON.stringify(configuration, null, 2) + '\n');
+    phase = 'HOST_START';
     if (process.platform === 'win32') host = await startOwnedWindowsHost(launcher, scratch, environment);
     else {
       child = spawn(launcher, [], { ...options, stdio: ['ignore', 'pipe', 'pipe'] }); child.stdout.resume(); child.stderr.resume();
@@ -277,6 +279,7 @@ export async function checkGuildKit(archive, { runtimeArchive, claude, outputDir
     peer = new Peer(new WebSocket(`ws://127.0.0.1:${configuration.port}/api/terminal?token=${bootstrap.token}`, { origin }));
     await peer.wait(() => peer.frames.some(frame => frame.type === 'hello'), 'hello');
     await peer.request('ready', { protocol: bootstrap.protocol, hostInstanceId: bootstrap.hostInstanceId });
+    phase = 'PROFILE';
     const started = await peer.request('start', { profileId: summary.profileId, cols: 80, rows: 24 }, 'start-result');
     const sessionId = started.session.id; await peer.request('attach', { sessionId });
     await peer.wait(() => peer.frames.some(frame => frame.type === 'snapshot-end' && frame.sessionId === sessionId), 'fixture restore');
@@ -289,9 +292,13 @@ export async function checkGuildKit(archive, { runtimeArchive, claude, outputDir
     const lease = peer.frames.findLast(frame => frame.type === 'control' && frame.leaseId).leaseId;
     peer.send({ type: 'input', sessionId, leaseId: lease, inputId: 1, data: 'owned-preset-probe\r' });
     await peer.wait(() => peer.output.includes('GUILD_KIT_FIXTURE_ACK:owned-preset-probe'), 'native fixture roundtrip');
+    phase = 'PROFILE_STOP';
     await peer.request('stop', { sessionId, leaseId: lease });
-    await peer.wait(() => peer.frames.some(frame => frame.type === 'session' && frame.session.id === sessionId && frame.session.processState === 'exited'), 'fixture cleanup');
+    await peer.wait(() => peer.frames.some(frame => frame.type === 'session' && frame.session.id === sessionId &&
+      frame.session.processState === 'exited' && !frame.session.stopPending &&
+      [null, undefined, 'CLEANUP_SCOPE_LIMITED'].includes(frame.session.failureCode)), 'fixture cleanup');
     checks.push('launch-profile', 'explicit-start-and-control', 'native-profile-stop');
+    phase = 'HOST_STOP';
     await peer.close(); peer = undefined; await host.stop();
     assert.equal(fs.existsSync(readyFile), false);
     await host.dispose?.(); host = undefined; checks.push('host-shutdown');
@@ -300,7 +307,9 @@ export async function checkGuildKit(archive, { runtimeArchive, claude, outputDir
     const realClaude = claude ?? (process.platform === 'win32' ? 'claude.exe' : 'claude');
     // Remove the harmless fixture from lookup before invoking the real provider CLI or hooks.
     const actualEnvironment = { ...environment, PATH: [path.dirname(process.execPath), process.env.PATH ?? ''].join(path.delimiter) };
+    phase = 'PLUGIN_VALIDATION';
     const provider = checkClaudePlugin(realClaude, bundle, workspace, actualEnvironment, inspected.build); checks.push('claude-plugin-validation');
+    phase = 'HOOK_VALIDATION';
     const hooks = checkBuildHooks(inspected.build, bundle, workspace, actualEnvironment); checks.push('hook-compatibility');
     fs.rmSync(scratch, { recursive: true, force: true }); cleaned = true; checks.push('owned-fixture-cleanup');
     const report = { guildKitChecked: true, archive: path.basename(archive), sha256: inspected.sha256, bytes: inspected.bytes,
@@ -315,7 +324,8 @@ export async function checkGuildKit(archive, { runtimeArchive, claude, outputDir
     else fs.writeFileSync(reportFile, proof, { flag: 'wx' });
     return { ...report, reportFile };
   } catch (error) {
-    primaryFailure = error; throw error;
+    primaryFailure = new Error('GUILD_KIT_PHASE_' + phase, { cause: error });
+    throw primaryFailure;
   } finally {
     if (peer) peer.socket.terminate();
     await finalizeGuildKitFixture(scratch, { host, cleaned, primaryFailure });

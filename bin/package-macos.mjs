@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { MACOS_DEPLOYMENT_TARGET } from './native-build.mjs';
 import { packagePosix, inspectMacPayload } from './package-posix.mjs';
 import { checkSignedPayloadRuntime, checkMacosRelease, digest, verifyCodeSignature } from './check-macos-release.mjs';
 
@@ -230,7 +231,7 @@ async function prepareSubmission(sourceRoot, identity, output) {
   run('/usr/bin/codesign', ['--sign', identity, '--timestamp', candidate], { timeout: 120000 });
   verifyCodeSignature(candidate, { diskImage: true, teamIdentifier });
   const receipt = { schema: 1, releaseName: name, candidate: path.relative(output, candidate), sourceRevision: revision,
-    architecture: process.arch, minimumMacOS: '15.0', signingTeamIdentifier: teamIdentifier,
+    architecture: process.arch, minimumMacOS: MACOS_DEPLOYMENT_TARGET, signingTeamIdentifier: teamIdentifier,
     submittedSha256: digest(candidate), status: 'SubmissionStarted', signedNativeTests: native, signedPackageChecks: packageChecked.checks.length };
   writeJson(receiptFile, receipt);
   return { receipt, receiptFile, candidate };

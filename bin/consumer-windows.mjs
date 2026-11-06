@@ -380,6 +380,10 @@ export async function checkWindowsArchive(archive) {
     const naturalLease = await control(peer, naturalTree.session.id);
     await peer.result(peer.request('stop', { sessionId: naturalTree.session.id, leaseId: naturalLease }), 'operation-result', 30000);
     await until(() => naturalPids.every(value => !alive(value)), 'natural root-exit descendants stopped');
+    const stoppedNatural = (await bootstrap()).sessions.find(session => session.id === naturalTree.session.id);
+    assert.equal(stoppedNatural?.processState, 'exited');
+    assert.equal(stoppedNatural.stopPending, false);
+    assert.ok([null, undefined, 'CLEANUP_SCOPE_LIMITED'].includes(stoppedNatural.failureCode));
     assert.ok(alive(siblingPid) && alive(rootPid));
     fs.unlinkSync(pidFile); fs.unlinkSync(exitFile);
     fixturePhase = 'root-exit-during-stop';

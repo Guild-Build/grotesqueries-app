@@ -44,7 +44,7 @@ holds the private key and notarization credentials.
 
 The pipeline:
 
-1. Compiles the helper with deployment target **macOS 15.0**. It inspects every
+1. Compiles the helper with deployment target **macOS 14.0**. It inspects every
    bundled Mach-O: Node, node-pty's addon and spawn helper, and the process helper.
    A foreign architecture, unexpected binary or newer minimum OS blocks packaging.
 2. Signs each Mach-O individually with a secure timestamp and hardened runtime.

@@ -7,7 +7,7 @@ import { createRequire } from 'node:module';
 import crypto from 'node:crypto';
 import type { LaunchProfile } from '@grotesqueries/protocol';
 import { startMacPty } from '../../app/services/mac-pty.js';
-import { verifyMacProcessSupport, type MacProcess } from '../../app/services/mac-processes.js';
+import { MacProcessOwnership, verifyMacProcessSupport, type MacProcess } from '../../app/services/mac-processes.js';
 import { scratchDirectory } from '../support/scratch.js';
 
 const root = process.cwd();
@@ -178,7 +178,7 @@ test('Mac unacknowledged bootstrap expires without stopping forever or executing
   } finally { if (captured) cleanupIdentity(captured); }
 });
 
-test('Mac startup error cleanup binds handshake birth and cannot abort another stopped sibling', { skip, timeout: 15000 }, async context => {
+test('Mac startup fails without acknowledging when inventory and abort metadata are unavailable', { skip, timeout: 15000 }, async context => {
   const sibling = spawn(process.execPath, ['-e', "process.kill(process.pid,'SIGSTOP');setInterval(()=>{},1000)"], { detached: true, stdio: 'ignore' });
   const siblingExit = new Promise(resolve => sibling.once('exit', resolve));
   let identity: MacProcess | undefined;
@@ -186,17 +186,23 @@ test('Mac startup error cleanup binds handshake birth and cannot abort another s
   assert.equal(spawnSync(helper, ['abort', String(sibling.pid), String(process.pid)]).status, 2);
   const original = childProcess.execFileSync; let capturedBootstrap: number | undefined;
   context.mock.method(childProcess, 'execFileSync', (...args: Parameters<typeof execFileSync>) => {
-    if (Array.isArray(args[1]) && args[1][0] === 'list') return '{"complete":false,"processes":[]}';
-    if (Array.isArray(args[1]) && args[1][0] === 'status') capturedBootstrap = Number(args[1][1]);
+    if (Array.isArray(args[1]) && args[1][0] === 'list') {
+      const envelope = JSON.parse(String(original(...args)));
+      capturedBootstrap = envelope.processes.find((item: MacProcess) =>
+        item.parent === process.pid && item.pid !== sibling.pid && item.session === item.pid)?.pid;
+      return '{"complete":false,"processes":[]}';
+    }
+    if (Array.isArray(args[1]) && ['status', 'kill'].includes(args[1][0])) throw new Error('test metadata unavailable');
     return original(...args);
   });
   const scratch = scratchDirectory('mac-startup-error-'); const marker = path.join(scratch, 'never-exec');
   try {
     await assert.rejects(startMacPty(root, { ...profile(`require('node:fs').writeFileSync(${JSON.stringify(marker)},'bad')`), projectDirectory: scratch }, 80, 24, 'startup-error'), /PTY_OWNERSHIP_FAILED/);
-    assert.equal(fs.existsSync(marker), false); assert.notEqual(capturedBootstrap, sibling.pid);
+    assert.equal(fs.existsSync(marker), false); assert.ok(capturedBootstrap); assert.notEqual(capturedBootstrap, sibling.pid);
     context.mock.restoreAll();
     assert.ok(list().some(item => item.pid === identity!.pid && item.birth === identity!.birth && item.stopped));
-    await until(() => !list().some(item => item.pid === capturedBootstrap && !item.zombie), 'captured bootstrap cleanup');
+    await until(() => !list().some(item => item.pid === capturedBootstrap && !item.zombie), 'unacknowledged bootstrap expiry');
+    assert.equal(fs.existsSync(marker), false);
   } finally { context.mock.restoreAll(); cleanupIdentity(identity!); await siblingExit; }
 });
 
@@ -224,7 +230,7 @@ test('Mac omitted retained identities are queried directly and unknown status ca
 });
 
 
-test('Mac Stop before deferred resume never starts the requested program', { skip, timeout: 10000 }, async () => {
+test('Mac Stop before deferred acknowledgement never starts the requested program', { skip, timeout: 10000 }, async () => {
   const scratch = scratchDirectory('mac-cancel-before-exec-'); const marker = path.join(scratch, 'never-exec');
   const pty = await startMacPty(root, { ...profile(`require('node:fs').writeFileSync(${JSON.stringify(marker)},'bad')`),
     projectDirectory: scratch }, 80, 24, 'cancel-before-exec');
@@ -290,4 +296,45 @@ test('Mac unknown post-snapshot authority refuses a new ownership claim and Stop
     fault = false; await pty.stop();
     assert.ok(list().some(item => item.pid === sibling.pid && item.birth === identity!.birth && !item.zombie));
   } finally { fault = false; context.mock.restoreAll(); await pty.stop(); cleanupIdentity(identity!); await siblingExit; }
+});
+
+test('Mac polls retire exited identities and share one deadline across unresolved metadata reads', { skip }, async context => {
+  const primary = { pid: 420000, parent: 1, session: 420000, birth: '100:0', zombie: false, stopped: false };
+  const children = Array.from({ length: 12 }, (_, index) =>
+    ({ ...primary, pid: primary.pid + index + 1, parent: primary.pid, birth: '101:0' }));
+  let rows = [primary, ...children];
+  let transient = true;
+  const childBudgets: number[] = [];
+  const childQueries = new Map<number, number>();
+  context.mock.method(childProcess, 'execFileSync', (_file: unknown, args: string[], options: { timeout: number }) => {
+    if (args[0] === 'list') return JSON.stringify({ complete: true, processes: rows });
+    if (args[0] === 'kill') {
+      rows = rows.filter(item => item.pid !== Number(args[1]));
+      return '';
+    }
+    const pid = Number(args[1]);
+    if (pid === primary.pid) {
+      return JSON.stringify(rows.length ? { state: 'alive', process: primary } : { state: 'exited' });
+    }
+    childQueries.set(pid, (childQueries.get(pid) ?? 0) + 1);
+    childBudgets.push(options.timeout);
+    if (transient && pid === children[1].pid) return '{"state":"unavailable"}';
+    if (pid === children[0].pid) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+    return '{"state":"exited"}';
+  });
+  const owner = new MacProcessOwnership(root, primary.pid, primary);
+  try {
+    rows = [primary];
+    await assert.rejects(owner.stop(), /STOP_METADATA_FAILED/);
+    assert.ok(childBudgets[0] - childBudgets[1] >= 10, 'second lookup uses the remaining budget');
+    transient = false;
+    assert.equal(owner.remaining(), true);
+    assert.equal(owner.remaining(), true);
+    const receipt = await owner.stop();
+    assert.deepEqual(new Set(receipt), new Set([primary.pid, ...children.map(child => child.pid)]));
+    assert.equal(childQueries.get(children[0].pid), 1);
+    assert.equal(childQueries.get(children[1].pid), 2);
+    assert.equal(childQueries.size, children.length);
+    assert.ok(children.slice(2).every(child => childQueries.get(child.pid) === 1));
+  } finally { owner.dispose(); }
 });

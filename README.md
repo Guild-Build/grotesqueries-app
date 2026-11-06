@@ -26,7 +26,7 @@ ownership for a retry. See [platform behavior](docs/platform-support.md).
 
 Use exactly Node **24.14.1** with npm; newer Node versions are not supported by this source release. Select it in your current shell before building. If you already use nvm, run `nvm install 24.14.1 && nvm use 24.14.1`. Otherwise, use the [official Node 24.14.1 distribution](https://nodejs.org/download/release/v24.14.1/). You also need the platform C compiler: Apple's Command Line Tools
 on Mac or a C compiler and libc development headers on Linux. Mac builds target
-macOS 15 or later. This build target alone does not establish release qualification.
+macOS 14 or later. This build target alone does not establish release qualification.
 
 ```sh
 node -e 'if (process.version !== "v24.14.1") { console.error("Use Node v24.14.1; found " + process.version); process.exit(1) }' &&
@@ -81,8 +81,9 @@ remote-access service. Host restart does not restore live terminal processes.
 ```sh
 npm run typecheck
 npm run typecheck:test
+npm run build
 npm test
-npm run package:posix
+node bin/package-posix.mjs
 npm run check:package:posix
 ```
 

@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { MACOS_DEPLOYMENT_TARGET } from './native-build.mjs';
 import { inspectMacPayload } from './package-posix.mjs';
 import { verifyConsumerFiles } from './consumer-smoke.mjs';
 
@@ -47,7 +48,7 @@ export function verifySignedPayload(folder) {
   }
   const metadata = JSON.parse(fs.readFileSync(path.join(folder, 'BUILD-METADATA.json'), 'utf8'));
   if (metadata.sourceDirty !== false || metadata.signing !== 'developer-id' || metadata.signingTeamIdentifier !== teamIdentifier ||
-    metadata.minimumMacOS !== '15.0' || JSON.stringify(metadata.machOBinaries) !== JSON.stringify(binaries)) throw new Error('MACOS_RELEASE_METADATA_MISMATCH');
+    metadata.minimumMacOS !== MACOS_DEPLOYMENT_TARGET || JSON.stringify(metadata.machOBinaries) !== JSON.stringify(binaries)) throw new Error('MACOS_RELEASE_METADATA_MISMATCH');
   return { teamIdentifier, binaries, metadata };
 }
 

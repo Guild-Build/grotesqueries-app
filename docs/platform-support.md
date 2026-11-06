@@ -10,6 +10,11 @@ cleanup is verified. Linux requires glibc, a kernel with pidfd support, and the
 exact operating system/CPU combination listed for the download. Alpine/musl
 packages are not supplied.
 
+The Linux diagnostic receipt lists at most 4,096 distinct process IDs. Cleanup
+continues after that limit; `verifiedPidsTruncated: true` marks an incomplete
+receipt. Successful Stop still requires the supervisor to have no children and
+the terminal to have exited. Unavailable process inventory remains a failure.
+
 Mac uses a bootstrap handshake, kernel birth identities, and audit-token signals.
 Its cleanup guarantee covers tracked processes only. A rapid double-fork/setsid
 daemon can leave the tracked tree before observation. Do not interpret a successful
@@ -25,7 +30,10 @@ All platforms retain failed or unknown cleanup and allow a cleanup-only retry.
 No platform recovers live PTYs after host loss. Native tests use harmless
 owned fixtures and verify that unrelated sibling processes survive Stop.
 
-The Mac build target is macOS 15. A release becomes supported on a platform only
+The Mac build target is macOS 14. Both Apple Silicon and Intel packages have native
+CI and separate source-free artifact consumers on macOS 15. A build for macOS 14
+does not prove execution on macOS 14; that runtime check remains separate.
+A release becomes supported on a platform only
 after its final downloadable bytes pass that platform's qualification. Signing,
 notarization and clean consumer tests are separate gates. Read the download page
 and release evidence for actual qualified targets; build success is insufficient.
