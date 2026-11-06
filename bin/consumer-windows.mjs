@@ -192,7 +192,7 @@ const alive = pid => { try { process.kill(pid, 0); return true; } catch (error) 
 /** Finalize only the owned fixture, retaining every primary and recovery failure. */
 export async function cleanupWindowsConsumer(scratch, ownedHost, fixturePids, primaryFailure) {
   const cleanupErrors = [];
-  try { if (ownedHost && alive(ownedHost.pid)) await ownedHost.stop(); }
+  try { await ownedHost?.stop(); }
   catch (error) { cleanupErrors.push(error); }
   try { if (fixturePids.some(alive)) cleanupErrors.push(new Error('WINDOWS_CONSUMER_PROCESSES_REMAIN: Recorded fixture processes are still live.')); }
   catch (error) { cleanupErrors.push(error); }

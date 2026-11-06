@@ -193,7 +193,9 @@ test('Windows consumer requires controller disposal and reports containment as f
     });
     assert.deepEqual(calls, ['stop', 'abort'], 'Known live fixture prevents normal disposal; containment cannot qualify');
     calls.length = 0;
-    await cleanupWindowsConsumer(folder, { pid: process.pid, stop: async () => { calls.push('stop'); },
+    await cleanupWindowsConsumer(folder, {
+      get pid() { assert.fail('Owned host cleanup must use its retained-handle Stop proof'); },
+      stop: async () => { calls.push('stop'); },
       dispose: async () => { calls.push('dispose'); }, abort: async () => { calls.push('abort'); } }, []);
     assert.deepEqual(calls, ['stop', 'dispose']); assert.equal(fs.existsSync(folder), false);
   } finally { fs.rmSync(folder, { recursive: true, force: true }); }

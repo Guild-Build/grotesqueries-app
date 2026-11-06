@@ -301,6 +301,7 @@ export async function checkGuildKit(archive, { runtimeArchive, claude, outputDir
     phase = 'HOST_STOP';
     await peer.close(); peer = undefined; await host.stop();
     assert.equal(fs.existsSync(readyFile), false);
+    phase = 'HOST_DISPOSE';
     await host.dispose?.(); host = undefined; checks.push('host-shutdown');
     if (process.platform === 'win32') checks.push('controller-job-before-create', 'suspended-host-ack', 'controller-graceful-disposal');
     const workspace = path.join(scratch, 'hook-workspace'); fs.mkdirSync(workspace);
